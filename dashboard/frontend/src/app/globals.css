@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface text-gray-100;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-surface;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-surface-border rounded;
+}
+
+/* Custom utilities */
+@layer components {
+  .card {
+    @apply bg-surface-card border border-surface-border rounded-xl p-5;
+  }
+  .stat-value {
+    @apply text-2xl font-bold tracking-tight;
+  }
+  .stat-label {
+    @apply text-xs text-gray-400 uppercase tracking-wider mt-1;
+  }
+  .pnl-positive {
+    @apply text-success;
+  }
+  .pnl-negative {
+    @apply text-danger;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+  }
+  .badge-buy {
+    @apply badge bg-success/20 text-success;
+  }
+  .badge-sell {
+    @apply badge bg-danger/20 text-danger;
+  }
+  .badge-info {
+    @apply badge bg-blue-500/20 text-blue-400;
+  }
+  .badge-warning {
+    @apply badge bg-warning/20 text-warning;
+  }
+  .badge-error {
+    @apply badge bg-danger/20 text-danger;
+  }
+}
