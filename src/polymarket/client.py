@@ -89,7 +89,7 @@ class PolymarketClient:
             return None
         try:
             mid = self._clob.get_midpoint(token_id)
-            return float(mid) if mid is not None else None
+            return self._parse_numeric(mid)
         except Exception:
             logger.exception("Error fetching midpoint for token %s", token_id)
             return None
@@ -101,10 +101,38 @@ class PolymarketClient:
             return None
         try:
             spread = self._clob.get_spread(token_id)
-            return float(spread) if spread is not None else None
+            return self._parse_numeric(spread)
         except Exception:
             logger.exception("Error fetching spread for token %s", token_id)
             return None
+
+    @staticmethod
+    def _parse_numeric(value: object) -> float | None:
+        """Extract a float from an SDK response (may be float, str, or dict)."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return None
+        if isinstance(value, dict):
+            # The CLOB SDK returns {"mid": "0.55"} or {"spread": "0.02"}
+            for key in ("mid", "midpoint", "spread", "price"):
+                if key in value:
+                    try:
+                        return float(value[key])
+                    except (TypeError, ValueError):
+                        pass
+            # Fallback: try the first numeric-looking value
+            for v in value.values():
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    continue
+        return None
 
     def get_price(self, token_id: str) -> float | None:
         """Return the last/midpoint price for a token."""
