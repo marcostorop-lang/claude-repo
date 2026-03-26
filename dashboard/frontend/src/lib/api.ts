@@ -1,20 +1,22 @@
-// Try the Next.js rewrite proxy first (same origin), fall back to direct backend
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// Detect backend URL: env var at build time, or same-host port 8000 fallback
+function detectApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  if (typeof window !== "undefined") {
+    // In the browser: call backend on port 8000 of the same hostname
+    return `${window.location.protocol}//${window.location.hostname}:8000`;
+  }
+  return "http://localhost:8000";
+}
 
-function getApiUrl(path: string, params?: Record<string, string>): string {
-  const base = API_BASE || window.location.origin;
+export async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
+  const base = detectApiBase();
   const url = new URL(`${base}${path}`);
   if (params) {
     Object.entries(params).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
     });
   }
-  return url.toString();
-}
-
-export async function apiFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
-  const url = getApiUrl(path, params);
-  const res = await fetch(url);
+  const res = await fetch(url.toString());
   if (!res.ok) throw new Error(`API error: ${res.status}`);
   return res.json();
 }
