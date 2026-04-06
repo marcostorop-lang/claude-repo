@@ -1,9 +1,6 @@
-"use client";
+import { getConfig } from "@/lib/data";
 
-import { useConfig } from "@/lib/hooks";
-import Loader from "@/components/ui/Loader";
-import EmptyState from "@/components/ui/EmptyState";
-import { Lock } from "lucide-react";
+export const dynamic = "force-dynamic";
 
 const LABELS: Record<string, string> = {
   TRADING_MODE: "Trading Mode",
@@ -37,16 +34,12 @@ const GROUPS: Record<string, string[]> = {
 };
 
 export default function ConfigPage() {
-  const { data, isLoading } = useConfig();
-
-  if (isLoading) return <Loader />;
-  if (!data) return <EmptyState message="Config not available." />;
+  const data = getConfig();
 
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2">
         <h2 className="text-lg font-semibold">Configuration</h2>
-        <Lock size={14} className="text-gray-500" />
         <span className="text-xs text-gray-500">Read-only</span>
       </div>
 
@@ -56,35 +49,23 @@ export default function ConfigPage() {
             <h3 className="text-sm font-medium text-gray-300 border-b border-surface-border pb-2">
               {group}
             </h3>
-            {keys.map((k) => (
-              <div key={k} className="flex justify-between text-sm">
-                <span className="text-gray-400">{LABELS[k] || k}</span>
-                <span className="font-mono text-white">
-                  {highlight(k, data.config[k] ?? "—")}
-                </span>
-              </div>
-            ))}
+            {keys.map((k) => {
+              const val = (data.config as Record<string, string>)[k] ?? "—";
+              let color = "text-white";
+              if (k === "TRADING_MODE") color = val === "paper" ? "text-blue-400" : "text-red-400";
+              if (k === "ALLOW_LIVE_TRADING") color = val === "true" ? "text-red-400" : "text-green-400";
+              return (
+                <div key={k} className="flex justify-between text-sm">
+                  <span className="text-gray-400">{LABELS[k] || k}</span>
+                  <span className={`font-mono ${color}`}>
+                    {k === "TRADING_MODE" ? val.toUpperCase() : val}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         ))}
       </div>
     </div>
   );
-}
-
-function highlight(key: string, value: string) {
-  if (key === "TRADING_MODE") {
-    return (
-      <span className={value === "paper" ? "text-blue-400" : "text-danger"}>
-        {value.toUpperCase()}
-      </span>
-    );
-  }
-  if (key === "ALLOW_LIVE_TRADING") {
-    return (
-      <span className={value === "true" ? "text-danger" : "text-success"}>
-        {value}
-      </span>
-    );
-  }
-  return value;
 }

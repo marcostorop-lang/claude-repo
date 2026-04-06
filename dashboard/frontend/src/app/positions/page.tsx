@@ -1,18 +1,17 @@
-"use client";
+import { getPositions } from "@/lib/data";
 
-import { usePositions } from "@/lib/hooks";
-import Loader from "@/components/ui/Loader";
-import EmptyState from "@/components/ui/EmptyState";
+export const dynamic = "force-dynamic";
 
 export default function PositionsPage() {
-  const { data, isLoading } = usePositions();
+  const data = getPositions();
 
-  if (isLoading) return <Loader />;
-  if (!data?.positions.length) return <EmptyState message="No open positions." />;
+  if (!data.positions.length) {
+    return <div className="card text-center text-gray-500 py-8">No open positions.</div>;
+  }
 
   return (
     <div className="space-y-4">
-      <h2 className="text-lg font-semibold">Open Positions</h2>
+      <h2 className="text-lg font-semibold">Open Positions ({data.positions.length})</h2>
       <div className="card overflow-x-auto p-0">
         <table className="w-full text-sm">
           <thead>
@@ -24,57 +23,37 @@ export default function PositionsPage() {
               <th className="px-4 py-3 text-right">Size</th>
               <th className="px-4 py-3 text-right">Unrealised PnL</th>
               <th className="px-4 py-3 text-left">Strategy</th>
-              <th className="px-4 py-3 text-right">SL %</th>
-              <th className="px-4 py-3 text-right">TP %</th>
               <th className="px-4 py-3 text-left">Opened</th>
             </tr>
           </thead>
           <tbody>
             {data.positions.map((p, i) => (
               <tr key={i} className="border-b border-surface-border/50 hover:bg-surface-hover/50">
-                <td className="px-4 py-3 max-w-[220px] truncate" title={p.question}>
-                  {p.question || p.token_id.slice(0, 12)}
+                <td className="px-4 py-3 max-w-[220px] truncate" title={String(p.question)}>
+                  {p.question as string}
                 </td>
                 <td className="px-4 py-3">
-                  <span className={p.side === "BUY" ? "badge-buy" : "badge-sell"}>{p.side}</span>
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-500/20 text-green-400">
+                    {p.side as string}
+                  </span>
                 </td>
-                <td className="px-4 py-3 text-right font-mono">{p.entry_price.toFixed(4)}</td>
-                <td className="px-4 py-3 text-right font-mono">{p.current_price.toFixed(4)}</td>
-                <td className="px-4 py-3 text-right font-mono">{p.size.toFixed(2)}</td>
-                <td
-                  className={`px-4 py-3 text-right font-mono ${
-                    p.unrealised_pnl >= 0 ? "pnl-positive" : "pnl-negative"
-                  }`}
-                >
-                  ${p.unrealised_pnl.toFixed(2)}
+                <td className="px-4 py-3 text-right font-mono">{(p.entry_price as number).toFixed(4)}</td>
+                <td className="px-4 py-3 text-right font-mono">{(p.current_price as number).toFixed(4)}</td>
+                <td className="px-4 py-3 text-right font-mono">{(p.size as number).toFixed(2)}</td>
+                <td className={`px-4 py-3 text-right font-mono ${
+                  (p.unrealised_pnl as number) >= 0 ? "text-green-400" : "text-red-400"
+                }`}>
+                  ${(p.unrealised_pnl as number).toFixed(2)}
                 </td>
-                <td className="px-4 py-3 text-gray-300">{p.strategy}</td>
-                <td className="px-4 py-3 text-right">
-                  <ProgressBar value={p.pct_to_stop_loss} color="danger" />
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <ProgressBar value={p.pct_to_take_profit} color="success" />
-                </td>
+                <td className="px-4 py-3 text-gray-300">{p.strategy as string}</td>
                 <td className="px-4 py-3 text-gray-400 whitespace-nowrap">
-                  {new Date(p.entry_time).toLocaleString()}
+                  {new Date(p.entry_time as string).toLocaleString()}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-    </div>
-  );
-}
-
-function ProgressBar({ value, color }: { value: number; color: "success" | "danger" }) {
-  const bg = color === "success" ? "bg-success" : "bg-danger";
-  return (
-    <div className="flex items-center gap-2">
-      <div className="w-16 h-1.5 bg-surface-border rounded-full overflow-hidden">
-        <div className={`h-full ${bg} rounded-full`} style={{ width: `${Math.min(100, value)}%` }} />
-      </div>
-      <span className="text-xs text-gray-400">{value.toFixed(0)}%</span>
     </div>
   );
 }

@@ -1,35 +1,16 @@
-"use client";
+import { getMarkets } from "@/lib/data";
 
-import { useState } from "react";
-import { useMarkets } from "@/lib/hooks";
-import Loader from "@/components/ui/Loader";
-import EmptyState from "@/components/ui/EmptyState";
-import { Search } from "lucide-react";
+export const dynamic = "force-dynamic";
 
 export default function MarketsPage() {
-  const [search, setSearch] = useState("");
-  const { data, isLoading } = useMarkets(search);
-
-  if (isLoading) return <Loader />;
+  const data = getMarkets();
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Markets</h2>
-        <div className="relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-          <input
-            type="text"
-            placeholder="Search markets..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 pr-4 py-1.5 bg-surface-card border border-surface-border rounded-lg text-sm focus:outline-none focus:border-brand-500"
-          />
-        </div>
-      </div>
+      <h2 className="text-lg font-semibold">Markets ({data.markets.length})</h2>
 
-      {!data?.markets.length ? (
-        <EmptyState message="No markets found." />
+      {!data.markets.length ? (
+        <div className="card text-center text-gray-500 py-8">No markets found.</div>
       ) : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">
@@ -49,11 +30,9 @@ export default function MarketsPage() {
                     {m.question}
                   </td>
                   <td className="px-4 py-3 text-right font-mono">{m.total_trades}</td>
-                  <td
-                    className={`px-4 py-3 text-right font-mono ${
-                      m.pnl >= 0 ? "pnl-positive" : "pnl-negative"
-                    }`}
-                  >
+                  <td className={`px-4 py-3 text-right font-mono ${
+                    m.pnl >= 0 ? "text-green-400" : "text-red-400"
+                  }`}>
                     ${m.pnl.toFixed(2)}
                   </td>
                   <td className="px-4 py-3 text-right">{m.win_rate}%</td>

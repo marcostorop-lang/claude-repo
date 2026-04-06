@@ -1,41 +1,16 @@
-"use client";
+import { getLogs } from "@/lib/data";
 
-import { useState } from "react";
-import { useLogs } from "@/lib/hooks";
-import Loader from "@/components/ui/Loader";
-import EmptyState from "@/components/ui/EmptyState";
-
-const LEVELS = ["", "INFO", "WARNING", "ERROR"];
+export const dynamic = "force-dynamic";
 
 export default function LogsPage() {
-  const [level, setLevel] = useState("");
-  const { data, isLoading } = useLogs(level || undefined);
-
-  if (isLoading) return <Loader />;
+  const data = getLogs();
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Logs & Events</h2>
-        <div className="flex gap-2">
-          {LEVELS.map((l) => (
-            <button
-              key={l}
-              onClick={() => setLevel(l)}
-              className={`px-3 py-1 rounded-lg text-xs border transition-colors ${
-                level === l
-                  ? "border-brand-500 bg-brand-600/20 text-brand-500"
-                  : "border-surface-border text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              {l || "All"}
-            </button>
-          ))}
-        </div>
-      </div>
+      <h2 className="text-lg font-semibold">Logs & Events</h2>
 
-      {!data?.logs.length ? (
-        <EmptyState message="No log entries." />
+      {!data.logs.length ? (
+        <div className="card text-center text-gray-500 py-8">No log entries.</div>
       ) : (
         <div className="card p-0 max-h-[70vh] overflow-auto">
           <table className="w-full text-xs font-mono">
@@ -43,18 +18,16 @@ export default function LogsPage() {
               {data.logs.map((entry, i) => (
                 <tr key={i} className="border-b border-surface-border/30 hover:bg-surface-hover/30">
                   <td className="px-3 py-2 text-gray-500 whitespace-nowrap w-40">
-                    {entry.timestamp}
+                    {new Date(entry.timestamp).toLocaleString()}
                   </td>
                   <td className="px-3 py-2 w-20">
-                    <span
-                      className={
-                        entry.level === "ERROR"
-                          ? "badge-error"
-                          : entry.level === "WARNING"
-                          ? "badge-warning"
-                          : "badge-info"
-                      }
-                    >
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                      entry.level === "ERROR"
+                        ? "bg-red-500/20 text-red-400"
+                        : entry.level === "WARNING"
+                        ? "bg-yellow-500/20 text-yellow-400"
+                        : "bg-blue-500/20 text-blue-400"
+                    }`}>
                       {entry.level}
                     </span>
                   </td>

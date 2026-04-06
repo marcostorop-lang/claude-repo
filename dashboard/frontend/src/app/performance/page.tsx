@@ -1,51 +1,21 @@
-"use client";
-
-import { usePerformance } from "@/lib/hooks";
-import Loader from "@/components/ui/Loader";
-import EmptyState from "@/components/ui/EmptyState";
+import { getPerformance } from "@/lib/data";
 import StatCard from "@/components/ui/StatCard";
 import EquityCurve from "@/components/charts/EquityCurve";
 import DailyPnlChart from "@/components/charts/DailyPnlChart";
 import WinLossDonut from "@/components/charts/WinLossDonut";
-import { exportCSV } from "@/lib/api";
-import { Download } from "lucide-react";
+
+export const dynamic = "force-dynamic";
 
 export default function PerformancePage() {
-  const { data, isLoading } = usePerformance();
+  const data = getPerformance();
 
-  if (isLoading) return <Loader />;
-  if (!data || data.total_closed === 0) return <EmptyState message="No closed trades yet." />;
-
-  const handleExport = () => {
-    exportCSV(
-      [
-        {
-          metric: "Total PnL",
-          value: data.total_pnl,
-        },
-        { metric: "Win Rate (%)", value: data.win_rate },
-        { metric: "Profit Factor", value: data.profit_factor },
-        { metric: "Max Drawdown", value: data.max_drawdown },
-        { metric: "Avg Win", value: data.avg_win },
-        { metric: "Avg Loss", value: data.avg_loss },
-        { metric: "Reward/Risk", value: data.reward_risk_ratio },
-        { metric: "Total Closed", value: data.total_closed },
-      ],
-      "performance_summary.csv"
-    );
-  };
+  if (data.total_closed === 0) {
+    return <div className="card text-center text-gray-500 py-8">No closed trades yet.</div>;
+  }
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Performance</h2>
-        <button
-          onClick={handleExport}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface-card border border-surface-border text-sm hover:bg-surface-hover transition-colors"
-        >
-          <Download size={14} /> Export Summary
-        </button>
-      </div>
+      <h2 className="text-lg font-semibold">Performance</h2>
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <StatCard
