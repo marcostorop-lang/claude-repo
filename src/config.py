@@ -82,6 +82,9 @@ class Config:
     # -- Storage ---------------------------------------------------------------
     sqlite_db_path: str = field(default_factory=lambda: _env("SQLITE_DB_PATH", "polymarket_bot.db"))
 
+    # -- Market fetch limit (to avoid downloading all 50K+ markets per tick) ---
+    max_markets_fetch: int = field(default_factory=lambda: _env_int("MAX_MARKETS_FETCH", 500))
+
     # -- Derived helpers -------------------------------------------------------
     @property
     def is_paper(self) -> bool:

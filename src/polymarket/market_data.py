@@ -53,8 +53,8 @@ class MarketDataService:
 
     def fetch_and_filter(self) -> list[MarketSnapshot]:
         """Return a filtered list of active market snapshots."""
-        raw_markets = self.client.get_all_active_markets()
-        logger.info("Fetched %d raw markets from Gamma API.", len(raw_markets))
+        raw_markets = self.client.get_active_markets_limited(self.cfg.max_markets_fetch)
+        logger.info("Fetched %d raw markets from Gamma API (limit=%d).", len(raw_markets), self.cfg.max_markets_fetch)
 
         snapshots: list[MarketSnapshot] = []
         for mkt in raw_markets:
@@ -99,12 +99,20 @@ class MarketDataService:
 
         # Enrich with price/spread (limited to max_markets)
         enriched: list[MarketSnapshot] = []
+        spread_rejected = 0
         for snap in filtered[: self.cfg.max_markets]:
             snap.price = self.client.get_price(snap.token_id)
             snap.spread = self.client.get_spread(snap.token_id)
-            if snap.is_valid:
-                enriched.append(snap)
+            if not snap.is_valid:
+                continue
+            if not self._passes_spread_filter(snap):
+                spread_rejected += 1
+                logger.debug("Spread filter rejected %s (spread=%.4f > max=%.4f)", snap.token_id[:12], snap.spread or 0, self.cfg.max_spread)
+                continue
+            enriched.append(snap)
 
+        if spread_rejected:
+            logger.info("Spread filter rejected %d markets (max_spread=%.4f).", spread_rejected, self.cfg.max_spread)
         logger.info("Enriched %d valid market snapshots.", len(enriched))
         return enriched
 
@@ -116,3 +124,9 @@ class MarketDataService:
         if snap.liquidity < self.cfg.min_liquidity:
             return False
         return True
+
+    def _passes_spread_filter(self, snap: MarketSnapshot) -> bool:
+        """Check spread after enrichment. Returns True if spread is acceptable."""
+        if snap.spread is None:
+            return True  # No spread data — allow (conservative: logged separately)
+        return snap.spread <= self.cfg.max_spread

@@ -26,6 +26,8 @@ class OrderRequest:
     size: float
     price: float
     strategy: str
+    spread: float = 0.0
+    exit_reason: str = ""
 
 
 @dataclass
@@ -57,6 +59,13 @@ class ExecutionEngine:
     def _paper_execute(self, order: OrderRequest) -> OrderResult:
         import uuid
 
+        # Simulate slippage: BUY at mid + half_spread, SELL at mid - half_spread
+        half_spread = order.spread / 2.0 if order.spread > 0 else 0.0
+        if order.side == "BUY":
+            fill_price = order.price + half_spread
+        else:
+            fill_price = max(order.price - half_spread, 0.0001)
+
         order_id = f"paper-{uuid.uuid4().hex[:12]}"
         self.store.insert_trade(
             order_id=order_id,
@@ -64,22 +73,28 @@ class ExecutionEngine:
             condition_id=order.condition_id,
             side=order.side,
             size=order.size,
-            price=order.price,
+            price=fill_price,
             strategy=order.strategy,
             mode="paper",
             timestamp=iso_now(),
+            exit_reason=order.exit_reason,
+            spread_at_entry=order.spread,
         )
         logger.info(
-            "[PAPER] %s %.4f of %s @ %.4f (strategy=%s)",
+            "[PAPER] %s %.4f of %s @ %.4f (mid=%.4f, spread=%.4f, slippage=%.4f, strategy=%s%s)",
             order.side,
             order.size,
             order.token_id[:12],
+            fill_price,
             order.price,
+            order.spread,
+            half_spread,
             order.strategy,
+            f", exit_reason={order.exit_reason}" if order.exit_reason else "",
         )
         return OrderResult(
             success=True, order_id=order_id, mode="paper",
-            message="Paper order recorded.",
+            message=f"Paper order recorded (fill={fill_price:.4f}, slippage={half_spread:.4f}).",
         )
 
     # ------------------------------------------------------------------

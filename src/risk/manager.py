@@ -31,12 +31,20 @@ class RiskManager:
         self.cfg = cfg
         self.portfolio = portfolio
 
-    def check(self, token_id: str, signal: Signal, proposed_size: float, price: float) -> RiskVerdict:
+    def check(self, token_id: str, signal: Signal, proposed_size: float, price: float, spread: float = 0.0) -> RiskVerdict:
         """Evaluate whether a trade should proceed and at what size."""
 
         # HOLD signals need no risk check
         if signal.action == Action.HOLD:
             return RiskVerdict(False, 0.0, "HOLD signal — no trade.")
+
+        # --- Duplicate position prevention ---
+        if signal.action == Action.BUY and token_id in self.portfolio.positions:
+            return RiskVerdict(False, 0.0, "Already have an open position for this token.")
+
+        # --- Spread check ---
+        if spread > 0 and spread > self.cfg.max_spread:
+            return RiskVerdict(False, 0.0, f"Spread {spread:.4f} exceeds max {self.cfg.max_spread:.4f}.")
 
         # --- Max open positions ---
         open_count = self.portfolio.open_position_count()

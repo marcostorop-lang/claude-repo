@@ -66,6 +66,26 @@ class PolymarketClient:
             offset += _GAMMA_PAGE_SIZE
         return markets
 
+    def get_active_markets_limited(self, max_total: int = 500) -> list[dict]:
+        """Fetch active markets with an upper bound on total records.
+
+        This prevents downloading all 50K+ markets every tick, which causes
+        500+ API calls and multi-minute tick times.
+        """
+        markets: list[dict] = []
+        offset = 0
+        while len(markets) < max_total:
+            page = self.get_active_markets(limit=_GAMMA_PAGE_SIZE, offset=offset)
+            if not page:
+                break
+            markets.extend(page)
+            if len(page) < _GAMMA_PAGE_SIZE:
+                break
+            offset += _GAMMA_PAGE_SIZE
+        if len(markets) >= max_total:
+            logger.info("Market fetch capped at %d (limit=%d).", len(markets), max_total)
+        return markets[:max_total]
+
     # ------------------------------------------------------------------
     # CLOB API helpers (may require auth for trading)
     # ------------------------------------------------------------------

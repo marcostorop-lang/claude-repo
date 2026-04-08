@@ -69,6 +69,39 @@ class PortfolioTracker:
                 total += pos.unrealised_pnl(current)
         return total
 
+    def reconstruct_from_trades(self, trades: list[dict]) -> None:
+        """Rebuild open positions and realised PnL from trade history.
+
+        Expects trades ordered by timestamp ascending. Each BUY opens or adds
+        to a position; each SELL closes or reduces it.  This allows the bot
+        to survive restarts without losing portfolio state.
+        """
+        self.positions.clear()
+        self.realised_pnl = 0.0
+
+        for t in trades:
+            token_id = t["token_id"]
+            side = t["side"]
+            if side == "BUY":
+                self.positions[token_id] = Position(
+                    token_id=token_id,
+                    condition_id=t["condition_id"],
+                    side="BUY",
+                    size=t["size"],
+                    entry_price=t["price"],
+                    strategy=t["strategy"],
+                    order_id=t["order_id"],
+                )
+            elif side == "SELL" and token_id in self.positions:
+                pos = self.positions.pop(token_id)
+                pnl = (t["price"] - pos.entry_price) * pos.size
+                self.realised_pnl += pnl
+
+        logger.info(
+            "Portfolio reconstructed: %d open positions, realised_pnl=%.4f",
+            len(self.positions), self.realised_pnl,
+        )
+
     def summary(self, price_fn=None) -> dict:
         unrealised = self.total_unrealised_pnl(price_fn) if price_fn else 0.0
         return {

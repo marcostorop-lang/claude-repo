@@ -59,6 +59,13 @@ def run_loop(cfg: Config) -> None:
     client = PolymarketClient(cfg)
     store = SQLiteStore(cfg.sqlite_db_path)
     portfolio = PortfolioTracker()
+
+    # Reconstruct portfolio from trade history so positions survive restarts
+    all_trades = store.get_all_trades()
+    if all_trades:
+        portfolio.reconstruct_from_trades(all_trades)
+        logger.info("Restored %d open positions from trade history.", portfolio.open_position_count())
+
     risk_mgr = RiskManager(cfg, portfolio)
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
@@ -104,25 +111,29 @@ def _tick(
 ) -> None:
     """One iteration of the bot loop."""
 
+    tick_ts = iso_now()
+
     # 1. Check stop-loss / take-profit on existing positions
-    tokens_to_close: list[str] = []
+    tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
         if current_price is None:
+            logger.debug("No price for position %s — skipping SL/TP check.", token_id[:12])
             continue
         if risk_mgr.check_stop_loss(pos.entry_price, current_price):
-            logger.info("Stop-loss triggered for %s", token_id[:12])
-            tokens_to_close.append(token_id)
+            logger.info("Stop-loss triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
+            tokens_to_close.append((token_id, "stop_loss"))
         elif risk_mgr.check_take_profit(pos.entry_price, current_price):
-            logger.info("Take-profit triggered for %s", token_id[:12])
-            tokens_to_close.append(token_id)
+            logger.info("Take-profit triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
+            tokens_to_close.append((token_id, "take_profit"))
 
-    for token_id in tokens_to_close:
+    for token_id, exit_reason in tokens_to_close:
         pos = portfolio.positions.get(token_id)
         if pos is None:
             continue
         close_side = "SELL" if pos.side == "BUY" else "BUY"
         current_price = client.get_price(token_id) or pos.entry_price
+        current_spread = client.get_spread(token_id) or 0.0
         order = OrderRequest(
             token_id=token_id,
             condition_id=pos.condition_id,
@@ -130,23 +141,34 @@ def _tick(
             size=pos.size,
             price=current_price,
             strategy=pos.strategy,
+            spread=current_spread,
+            exit_reason=exit_reason,
         )
         result = executor.execute(order)
         if result.success:
-            portfolio.close_position(token_id, current_price)
+            pnl = portfolio.close_position(token_id, current_price)
+            store.insert_decision(
+                timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
+                action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f}",
+                strategy=pos.strategy, price=current_price, spread=current_spread,
+            )
 
     # 2. Fetch market snapshots
     snapshots = market_svc.fetch_and_filter()
     logger.info("Evaluating %d market snapshots.", len(snapshots))
 
     # 3. Evaluate strategy on each snapshot
+    signals_generated = 0
+    risk_rejections = 0
+    trades_executed = 0
+
     for snap in snapshots:
         if snap.token_id in portfolio.positions:
             continue  # already have a position
 
         # Record price
         if snap.price is not None:
-            store.insert_price(snap.token_id, snap.price, iso_now())
+            store.insert_price(snap.token_id, snap.price, tick_ts)
 
         history = store.get_price_history(snap.token_id)
         sig = strategy.evaluate(snap, history)
@@ -154,11 +176,21 @@ def _tick(
         if sig.action == Action.HOLD:
             continue
 
+        signals_generated += 1
+
         # 4. Risk check
         proposed_size = cfg.max_position_size / snap.price if snap.price else 0
-        verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0)
+        verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0)
         if not verdict.allowed:
+            risk_rejections += 1
             logger.debug("Risk denied for %s: %s", snap.token_id[:12], verdict.reason)
+            store.insert_decision(
+                timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                action="RISK_REJECTED", reason=verdict.reason,
+                strategy=strategy.name, confidence=sig.confidence,
+                price=snap.price or 0, spread=snap.spread or 0,
+                signal_detail=sig.reason, risk_detail=verdict.reason,
+            )
             continue
 
         # 5. Execute
@@ -169,10 +201,12 @@ def _tick(
             size=verdict.adjusted_size,
             price=snap.price or 0,
             strategy=strategy.name,
+            spread=snap.spread or 0.0,
         )
         result = executor.execute(order)
 
         if result.success and sig.action == Action.BUY:
+            trades_executed += 1
             portfolio.open_position(
                 Position(
                     token_id=snap.token_id,
@@ -184,10 +218,20 @@ def _tick(
                     order_id=result.order_id,
                 )
             )
+            store.insert_decision(
+                timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                action="ENTRY_BUY", reason=sig.reason,
+                strategy=strategy.name, confidence=sig.confidence,
+                price=snap.price or 0, spread=snap.spread or 0,
+                signal_detail=sig.reason,
+            )
 
-    # Log portfolio summary
+    # Log tick summary
     summary = portfolio.summary(price_fn=client.get_price)
-    logger.info("Portfolio: %s", summary)
+    logger.info(
+        "Tick complete: markets=%d, signals=%d, risk_rejected=%d, trades=%d | Portfolio: %s",
+        len(snapshots), signals_generated, risk_rejections, trades_executed, summary,
+    )
 
 
 # ---------------------------------------------------------------------------
