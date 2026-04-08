@@ -1,7 +1,21 @@
-const Database = require("/home/user/claude-repo/dashboard/frontend/node_modules/better-sqlite3");
+const path = require("path");
 const fs = require("fs");
 
-const db = new Database("/home/user/claude-repo/polymarket_bot.db", { readonly: true });
+// Try to load better-sqlite3 from dashboard/frontend or globally
+let Database;
+try {
+  Database = require(path.join(__dirname, "dashboard", "frontend", "node_modules", "better-sqlite3"));
+} catch {
+  Database = require("better-sqlite3");
+}
+
+const DB_PATH = process.env.SQLITE_DB_PATH || path.join(__dirname, "polymarket_bot.db");
+if (!fs.existsSync(DB_PATH)) {
+  console.error("Database not found at:", DB_PATH);
+  console.error("Run the bot first: python -m src.main run-bot");
+  process.exit(1);
+}
+const db = new Database(DB_PATH, { readonly: true });
 function query(sql, params = []) { return db.prepare(sql).all(...params); }
 function queryOne(sql, params = []) { return db.prepare(sql).get(...params); }
 
@@ -80,7 +94,7 @@ strategies.sort((a, b) => b.total_pnl - a.total_pnl);
 strategies.forEach((r, i) => r.rank = i + 1);
 
 // === MARKETS ===
-const mkts = query("SELECT m.condition_id, m.question, COUNT(t.id) as total_trades, GROUP_CONCAT(DISTINCT t.strategy) as strategies FROM markets_cache m LEFT JOIN trades t ON m.condition_id = t.condition_id GROUP BY m.condition_id ORDER BY COUNT(t.id) DESC");
+const mkts = query("SELECT m.condition_id, m.question, COUNT(t.id) as total_trades, GROUP_CONCAT(DISTINCT t.strategy) as strategies FROM markets_cache m LEFT JOIN trades t ON m.condition_id = t.condition_id GROUP BY m.condition_id ORDER BY COUNT(t.id) DESC LIMIT 50");
 const marketsList = mkts.map(r => {
   const mt = query("SELECT * FROM trades WHERE condition_id = ? ORDER BY timestamp", [r.condition_id]);
   const mb = {};
@@ -360,6 +374,8 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
 </body>
 </html>`;
 
-fs.writeFileSync("/home/user/claude-repo/docs/dashboard.html", html);
+const outDir = path.join(__dirname, "docs");
+if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+fs.writeFileSync(path.join(outDir, "dashboard.html"), html);
 console.log("Dashboard HTML generated:", html.length, "bytes");
 db.close();
