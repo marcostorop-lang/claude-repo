@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PolyBot Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1117;color:#e5e7eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;min-height:100vh}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:220px;background:#161b22;border-right:1px solid #2a3040;display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:10}
+.sidebar .logo{padding:16px 20px;border-bottom:1px solid #2a3040;font-size:18px;font-weight:700;color:#fff}
+.sidebar .logo span{color:#6366f1}
+.sidebar nav{flex:1;padding:8px}
+.sidebar a{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;color:#9ca3af;text-decoration:none;font-size:14px;margin:2px 0;transition:all .15s}
+.sidebar a:hover,.sidebar a.active{background:rgba(99,102,241,.15);color:#6366f1}
+.sidebar .ver{padding:12px 20px;border-top:1px solid #2a3040;font-size:11px;color:#6b7280}
+.main{margin-left:220px;flex:1}
+.header{height:56px;border-bottom:1px solid #2a3040;display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;background:#0f1117;z-index:5}
+.header .status{display:flex;align-items:center;gap:8px;font-size:12px;color:#22c55e}
+.dot{width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.content{padding:24px;max-width:1200px}
+h2{font-size:18px;font-weight:600;margin-bottom:16px}
+h3{font-size:14px;font-weight:500;color:#9ca3af;margin-bottom:12px}
+.section{margin-bottom:36px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:16px}
+@media(max-width:900px){.grid4{grid-template-columns:repeat(2,1fr)}.sidebar{display:none}.main{margin-left:0}}
+.card{background:#161b22;border:1px solid #2a3040;border-radius:12px;padding:16px}
+.stat-val{font-size:24px;font-weight:700;letter-spacing:-0.5px}
+.stat-label{font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;margin-top:4px}
+.green{color:#22c55e}.red{color:#ef4444}.blue{color:#60a5fa}.white{color:#fff}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{text-align:left;padding:10px 14px;color:#6b7280;font-size:11px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #2a3040;font-weight:500}
+tbody td{padding:10px 14px;border-bottom:1px solid rgba(42,48,64,.5)}
+tbody tr:hover{background:rgba(28,35,51,.5)}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-buy{background:rgba(34,197,94,.15);color:#22c55e}
+.badge-sell{background:rgba(239,68,68,.15);color:#ef4444}
+.badge-paper{background:rgba(96,165,250,.15);color:#60a5fa}
+.strat-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.strat-metric .val{font-size:16px;font-weight:600;font-family:monospace}
+.strat-metric .lbl{font-size:11px;color:#6b7280}
+.bar-chart{display:flex;align-items:flex-end;gap:3px;height:120px;margin-top:8px}
+.bar{min-width:6px;flex:1;border-radius:3px 3px 0 0}
+.mono{font-family:'SF Mono',Monaco,Consolas,monospace}
+.text-right{text-align:right}
+.overflow-x{overflow-x:auto}
+.config-row{display:flex;justify-content:space-between;padding:6px 0;font-size:13px}
+.config-row .key{color:#9ca3af}.config-row .val{font-family:monospace;color:#fff}
+.divider{height:1px;background:#2a3040;margin:24px 0}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="sidebar">
+  <div class="logo">Poly<span>Bot</span></div>
+  <nav>
+    <a href="#overview" class="active">Overview</a>
+    <a href="#performance">Performance</a>
+    <a href="#trades">Trades</a>
+    <a href="#markets">Markets</a>
+    <a href="#strategies">Strategies</a>
+    <a href="#config">Config</a>
+  </nav>
+  <div class="ver">Polymarket Bot v1.0</div>
+</aside>
+<div class="main">
+<div class="header">
+  <span style="font-size:14px;color:#9ca3af">PolyBot Dashboard</span>
+  <div class="status"><div class="dot"></div> Paper Trading Mode</div>
+</div>
+<div class="content">
+
+<div class="section" id="overview">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+    <div class="dot"></div>
+    <h2 style="margin:0">Bot Active</h2>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="stat-val" style="color:#ef4444">$-24.86</div><div class="stat-label">Total PnL</div></div>
+    <div class="card"><div class="stat-val white">$975.14</div><div class="stat-label">Simulated Balance</div></div>
+    <div class="card"><div class="stat-val white">128</div><div class="stat-label">Total Trades</div></div>
+    <div class="card"><div class="stat-val white">43.5%</div><div class="stat-label">Win Rate</div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="stat-val green">20</div><div class="stat-label">Winning Trades</div></div>
+    <div class="card"><div class="stat-val red">26</div><div class="stat-label">Losing Trades</div></div>
+    <div class="card"><div class="stat-val white">8</div><div class="stat-label">Markets</div></div>
+    <div class="card"><div class="stat-val white">4</div><div class="stat-label">Open Positions</div></div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<div class="section" id="performance">
+  <h2>Performance</h2>
+  <div class="grid4">
+    <div class="card"><div class="stat-val" style="color:#ef4444">$-24.86</div><div class="stat-label">Closed PnL</div></div>
+    <div class="card"><div class="stat-val white">43.5%</div><div class="stat-label">Win Rate</div></div>
+    <div class="card"><div class="stat-val white">0.75</div><div class="stat-label">Profit Factor</div></div>
+    <div class="card"><div class="stat-val red">$43.76</div><div class="stat-label">Max Drawdown</div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="stat-val green">$3.73</div><div class="stat-label">Avg Win</div></div>
+    <div class="card"><div class="stat-val red">$3.82</div><div class="stat-label">Avg Loss</div></div>
+    <div class="card"><div class="stat-val green">20</div><div class="stat-label">Winning</div></div>
+    <div class="card"><div class="stat-val red">26</div><div class="stat-label">Losing</div></div>
+  </div>
+  <div class="card">
+    <h3>Daily PnL</h3>
+    <div class="bar-chart"><div class="bar" style="height:34.06005758946936px;background:#22c55e" title="2026-03-06: $8.28"></div><div class="bar" style="height:4px;background:#22c55e" title="2026-03-07: $0.39"></div><div class="bar" style="height:24.310983134512547px;background:#ef4444" title="2026-03-08: $-5.91"></div><div class="bar" style="height:5.018510900863842px;background:#ef4444" title="2026-03-09: $-1.22"></div><div class="bar" style="height:35.04730563554093px;background:#22c55e" title="2026-03-10: $8.52"></div><div class="bar" style="height:49.19786096256685px;background:#ef4444" title="2026-03-11: $-11.96"></div><div class="bar" style="height:14.603044014808722px;background:#22c55e" title="2026-03-12: $3.55"></div><div class="bar" style="height:23.28259975318799px;background:#ef4444" title="2026-03-13: $-5.66"></div><div class="bar" style="height:47.593582887700535px;background:#22c55e" title="2026-03-14: $11.57"></div><div class="bar" style="height:7.6923076923076925px;background:#22c55e" title="2026-03-15: $1.87"></div><div class="bar" style="height:30.97490744549568px;background:#22c55e" title="2026-03-16: $7.53"></div><div class="bar" style="height:15.960510078157137px;background:#ef4444" title="2026-03-17: $-3.88"></div><div class="bar" style="height:4px;background:#ef4444" title="2026-03-18: $-0.29"></div><div class="bar" style="height:4.8539695598519135px;background:#22c55e" title="2026-03-19: $1.18"></div><div class="bar" style="height:25.668449197860966px;background:#ef4444" title="2026-03-21: $-6.24"></div><div class="bar" style="height:38.05018510900864px;background:#22c55e" title="2026-03-22: $9.25"></div><div class="bar" style="height:47.305635540929664px;background:#ef4444" title="2026-03-23: $-11.50"></div><div class="bar" style="height:4px;background:#ef4444" title="2026-03-24: $-0.68"></div><div class="bar" style="height:4px;background:#ef4444" title="2026-03-25: $-0.87"></div><div class="bar" style="height:100px;background:#ef4444" title="2026-03-26: $-24.31"></div><div class="bar" style="height:48.08720691073633px;background:#22c55e" title="2026-03-28: $11.69"></div><div class="bar" style="height:39.037433155080215px;background:#ef4444" title="2026-03-29: $-9.49"></div><div class="bar" style="height:32.00329082682024px;background:#ef4444" title="2026-03-30: $-7.78"></div><div class="bar" style="height:4px;background:#22c55e" title="2026-03-31: $0.09"></div><div class="bar" style="height:4.195804195804196px;background:#22c55e" title="2026-04-03: $1.02"></div></div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-top:6px">
+      <span>2026-03-06</span><span>2026-04-03</span>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px">
+    <h3>Equity Curve</h3>
+    <svg viewBox="0 0 460 120" style="width:100%;height:120px" preserveAspectRatio="none">
+      <polyline points="0,31.732175502742223 10,34.58866544789761 20,21.79159049360146 30,30.840950639853745 40,43.70658135283364 50,44.34643510054845 60,47.13436928702011 70,27.664533820840944 80,34.90859232175502 90,38.45063985374772 100,54.99542961608775 110,47.36288848263254 120,46.88299817184644 130,44.39213893967093 140,50.379341864716636 150,59.817184643510046 160,39.387568555758676 170,33.377513711151735 180,29.10420475319927 190,25.379341864716636 200,11.896709323583181 210,20.763254113345525 220,21.425959780621582 230,18.729433272394886 240,18.68372943327239 250,32.989031078610594 260,24.53382084095064 270,11.873857404021933 280,16.672760511883 290,10 300,19.50639853747714 310,38.15356489945155 320,39.70749542961609 330,41.695612431444246 340,62.05667276051189 350,86.82815356489945 360,97.24862888482633 370,93.4780621572212 380,94.3692870201097 390,70.53473491773309 400,73.345521023766 410,74.21389396709324 420,92.22120658135285 430,110 440,109.79433272394881 450,107.46343692870201" fill="none" stroke="#ef4444" stroke-width="2"/>
+    </svg>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-top:4px">
+      <span>$-25.97</span><span>$17.79</span>
+    </div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<div class="section" id="trades">
+  <h2>Recent Trades (128 total)</h2>
+  <div class="card overflow-x" style="padding:0">
+    <table>
+      <thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Strategy</th><th class="text-right">Price</th><th class="text-right">Size</th><th>Mode</th></tr></thead>
+      <tbody><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/5/2026, 8:43:16 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.7474</td>
+    <td class="text-right mono">18.84</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/5/2026, 3:18:32 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.3869</td>
+    <td class="text-right mono">8.27</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/4/2026, 1:57:25 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will SpaceX land on Mars by 2030?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.2204</td>
+    <td class="text-right mono">49.84</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/4/2026, 8:06:48 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will ETH flip BTC market cap?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.7283</td>
+    <td class="text-right mono">16.41</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/4/2026, 5:42:48 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will AI regulation pass in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.7810</td>
+    <td class="text-right mono">37.16</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/4/2026, 2:26:28 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.6448</td>
+    <td class="text-right mono">30.68</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/3/2026, 11:57:32 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Democrats win 2026 midterms?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.7718</td>
+    <td class="text-right mono">12.57</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/3/2026, 11:25:06 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will SpaceX land on Mars by 2030?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2078</td>
+    <td class="text-right mono">40.15</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/3/2026, 11:04:40 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.3608</td>
+    <td class="text-right mono">32.62</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/3/2026, 12:01:48 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Democrats win 2026 midterms?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.6836</td>
+    <td class="text-right mono">17.29</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/3/2026, 3:49:25 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will BTC exceed $100k by end of 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.3732</td>
+    <td class="text-right mono">44.30</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/2/2026, 11:16:48 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will AI regulation pass in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.3307</td>
+    <td class="text-right mono">44.17</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/2/2026, 9:19:44 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.6849</td>
+    <td class="text-right mono">27.08</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/2/2026, 5:27:20 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will ETH flip BTC market cap?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.6797</td>
+    <td class="text-right mono">7.22</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/2/2026, 11:07:31 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.1948</td>
+    <td class="text-right mono">26.16</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/2/2026, 12:50:16 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2467</td>
+    <td class="text-right mono">32.46</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/1/2026, 8:04:51 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.2408</td>
+    <td class="text-right mono">44.76</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">4/1/2026, 1:33:35 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.7619</td>
+    <td class="text-right mono">24.39</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/31/2026, 1:42:30 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Democrats win 2026 midterms?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.8429</td>
+    <td class="text-right mono">7.41</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/31/2026, 1:16:39 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will AI regulation pass in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.3579</td>
+    <td class="text-right mono">42.58</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/31/2026, 8:46:10 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.6255</td>
+    <td class="text-right mono">31.08</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/31/2026, 12:29:09 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2161</td>
+    <td class="text-right mono">27.76</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 9:43:01 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2912</td>
+    <td class="text-right mono">24.84</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 11:05:29 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will BTC exceed $100k by end of 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.7596</td>
+    <td class="text-right mono">29.77</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 8:27:27 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will ETH flip BTC market cap?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2540</td>
+    <td class="text-right mono">37.32</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 7:28:36 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will AI regulation pass in 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.2228</td>
+    <td class="text-right mono">7.03</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 5:46:47 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Democrats win 2026 midterms?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">mean_reversion</td>
+    <td class="text-right mono">0.3432</td>
+    <td class="text-right mono">35.08</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/30/2026, 1:39:20 AM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will SpaceX land on Mars by 2030?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.5550</td>
+    <td class="text-right mono">31.02</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/29/2026, 4:21:05 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will ETH flip BTC market cap?</td>
+    <td><span class="badge badge-sell">SELL</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.3050</td>
+    <td class="text-right mono">15.36</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr><tr>
+    <td style="color:#6b7280;white-space:nowrap">3/29/2026, 12:40:28 PM</td>
+    <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td><span class="badge badge-buy">BUY</span></td>
+    <td style="color:#d1d5db">simple_momentum</td>
+    <td class="text-right mono">0.8092</td>
+    <td class="text-right mono">20.17</td>
+    <td><span class="badge badge-paper">paper</span></td>
+  </tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<div class="section" id="markets">
+  <h2>Markets (8)</h2>
+  <div class="card overflow-x" style="padding:0">
+    <table>
+      <thead><tr><th>Market</th><th class="text-right">Trades</th><th class="text-right">PnL</th><th class="text-right">Win Rate</th><th>Strategies</th></tr></thead>
+      <tbody><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will Solana reach $500?</td>
+    <td class="text-right mono">23</td>
+    <td class="text-right mono" style="color:#22c55e">$0.36</td>
+    <td class="text-right">57.1%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will BTC exceed $100k by end of 2026?</td>
+    <td class="text-right mono">18</td>
+    <td class="text-right mono" style="color:#ef4444">$-0.49</td>
+    <td class="text-right">55.6%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will ETH flip BTC market cap?</td>
+    <td class="text-right mono">16</td>
+    <td class="text-right mono" style="color:#ef4444">$-22.42</td>
+    <td class="text-right">16.7%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will AI regulation pass in 2026?</td>
+    <td class="text-right mono">16</td>
+    <td class="text-right mono" style="color:#ef4444">$-7.46</td>
+    <td class="text-right">40%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will the Fed cut rates in Q2 2026?</td>
+    <td class="text-right mono">15</td>
+    <td class="text-right mono" style="color:#ef4444">$-1.04</td>
+    <td class="text-right">40%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">US GDP growth > 3% in 2026?</td>
+    <td class="text-right mono">14</td>
+    <td class="text-right mono" style="color:#ef4444">$-10.12</td>
+    <td class="text-right">25%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Will SpaceX land on Mars by 2030?</td>
+    <td class="text-right mono">13</td>
+    <td class="text-right mono" style="color:#22c55e">$4.11</td>
+    <td class="text-right">40%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr><tr>
+    <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Democrats win 2026 midterms?</td>
+    <td class="text-right mono">13</td>
+    <td class="text-right mono" style="color:#22c55e">$12.20</td>
+    <td class="text-right">60%</td>
+    <td style="color:#d1d5db;font-size:12px">mean_reversion,simple_momentum</td>
+  </tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<div class="section" id="strategies">
+  <h2>Strategy Comparison</h2>
+  <div class="grid2"><div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span style="font-weight:600;color:#fff">&#127942; simple_momentum</span>
+      <span style="font-size:11px;color:#6b7280">Rank #1</span>
+    </div>
+    <div class="strat-grid">
+      <div class="strat-metric"><div class="val white">63</div><div class="lbl">Total Trades</div></div>
+      <div class="strat-metric"><div class="val white">19</div><div class="lbl">Closed</div></div>
+      <div class="strat-metric"><div class="val red">42.1%</div><div class="lbl">Win Rate</div></div>
+      <div class="strat-metric"><div class="val green">$14.38</div><div class="lbl">Total PnL</div></div>
+      <div class="strat-metric"><div class="val green">8</div><div class="lbl">Winning</div></div>
+      <div class="strat-metric"><div class="val red">11</div><div class="lbl">Losing</div></div>
+    </div>
+  </div><div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <span style="font-weight:600;color:#fff">mean_reversion</span>
+      <span style="font-size:11px;color:#6b7280">Rank #2</span>
+    </div>
+    <div class="strat-grid">
+      <div class="strat-metric"><div class="val white">65</div><div class="lbl">Total Trades</div></div>
+      <div class="strat-metric"><div class="val white">19</div><div class="lbl">Closed</div></div>
+      <div class="strat-metric"><div class="val red">42.1%</div><div class="lbl">Win Rate</div></div>
+      <div class="strat-metric"><div class="val red">$-8.66</div><div class="lbl">Total PnL</div></div>
+      <div class="strat-metric"><div class="val green">8</div><div class="lbl">Winning</div></div>
+      <div class="strat-metric"><div class="val red">11</div><div class="lbl">Losing</div></div>
+    </div>
+  </div></div>
+</div>
+
+<div class="divider"></div>
+
+<div class="section" id="config">
+  <h2>Configuration</h2>
+  <div class="grid2">
+    <div class="card">
+      <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Trading</h3>
+      <div class="config-row"><span class="key">Trading Mode</span><span class="val" style="color:#60a5fa">PAPER</span></div>
+      <div class="config-row"><span class="key">Live Trading</span><span class="val" style="color:#22c55e">false</span></div>
+      <div class="config-row"><span class="key">Poll Interval</span><span class="val">30s</span></div>
+      <div class="config-row"><span class="key">Strategy</span><span class="val">both</span></div>
+    </div>
+    <div class="card">
+      <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Risk Management</h3>
+      <div class="config-row"><span class="key">Max Position Size</span><span class="val">$50</span></div>
+      <div class="config-row"><span class="key">Max Exposure</span><span class="val">$500</span></div>
+      <div class="config-row"><span class="key">Stop Loss</span><span class="val">10%</span></div>
+      <div class="config-row"><span class="key">Take Profit</span><span class="val">15%</span></div>
+      <div class="config-row"><span class="key">Max Open Positions</span><span class="val">10</span></div>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;padding:24px;font-size:11px;color:#4b5563">
+  Generated 2026-04-08 13:56:38 UTC &middot; PolyBot v1.0
+</div>
+
+</div></div></div>
+</body>
+</html>
