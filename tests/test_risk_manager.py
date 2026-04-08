@@ -55,9 +55,10 @@ class TestRiskManager:
         portfolio.open_position(Position("t1", "c1", "BUY", 150, 0.5, "test", "o1"))
         rm = RiskManager(cfg, portfolio)
         # Existing exposure = 150 * 0.5 = 75.  Max = 100.  Available = 25.
-        verdict = rm.check("tok2", Signal(Action.BUY, 0.8), 200, 1.0)
+        # Use price=0.50 (within default min/max price bounds)
+        verdict = rm.check("tok2", Signal(Action.BUY, 0.8), 200, 0.50)
         assert verdict.allowed
-        assert verdict.adjusted_size == pytest.approx(25.0)
+        assert verdict.adjusted_size == pytest.approx(50.0)  # available=25, size=25/0.50=50
 
     def test_stop_loss(self):
         cfg = _cfg(STOP_LOSS_PCT="0.10")

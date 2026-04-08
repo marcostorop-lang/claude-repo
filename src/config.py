@@ -65,6 +65,13 @@ class Config:
     stop_loss_pct: float = field(default_factory=lambda: _env_float("STOP_LOSS_PCT", 0.10))
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 0.20))
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5))
+    max_daily_loss: float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS", 50.0))
+    max_exposure_per_event: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_EVENT", 100.0))
+
+    # -- Price filters ---------------------------------------------------------
+    min_price: float = field(default_factory=lambda: _env_float("MIN_PRICE", 0.05))
+    max_price: float = field(default_factory=lambda: _env_float("MAX_PRICE", 0.95))
+    stale_price_seconds: int = field(default_factory=lambda: _env_int("STALE_PRICE_SECONDS", 300))
 
     # -- Strategy --------------------------------------------------------------
     strategy: str = field(default_factory=lambda: _env("STRATEGY", "simple_momentum"))
@@ -84,6 +91,9 @@ class Config:
 
     # -- Market fetch limit (to avoid downloading all 50K+ markets per tick) ---
     max_markets_fetch: int = field(default_factory=lambda: _env_int("MAX_MARKETS_FETCH", 500))
+
+    # -- Kill switch -----------------------------------------------------------
+    kill_switch_file: str = field(default_factory=lambda: _env("KILL_SWITCH_FILE", "KILL_SWITCH"))
 
     # -- Derived helpers -------------------------------------------------------
     @property

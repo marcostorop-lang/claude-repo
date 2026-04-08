@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -30,7 +31,7 @@ from src.storage.sqlite_store import SQLiteStore
 from src.strategy.base import Action, BaseStrategy
 from src.strategy.mean_reversion import MeanReversion
 from src.strategy.simple_momentum import SimpleMomentum
-from src.utils.time_utils import iso_now
+from src.utils.time_utils import iso_now, utc_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -81,14 +82,29 @@ def run_loop(cfg: Config) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    tick_count = 0
     while not _shutdown:
-        try:
-            _tick(market_svc, strategy, risk_mgr, executor, portfolio, store, client, cfg)
-        except Exception:
-            logger.exception("Error in bot tick — will retry next cycle.")
+        # Kill switch file check
+        if os.path.exists(cfg.kill_switch_file):
+            logger.warning("KILL SWITCH FILE detected (%s) — shutting down.", cfg.kill_switch_file)
+            break
+
+        # Circuit breaker check
+        if risk_mgr.is_circuit_breaker_active:
+            logger.warning("Circuit breaker active (daily loss $%.2f). Skipping tick, monitoring only.", abs(risk_mgr.daily_pnl))
+            # Still check SL/TP on existing positions even when circuit breaker is active
+            _check_exits_only(risk_mgr, executor, portfolio, store, client, cfg)
+        else:
+            try:
+                _tick(market_svc, strategy, risk_mgr, executor, portfolio, store, client, cfg)
+            except Exception:
+                logger.exception("Error in bot tick — will retry next cycle.")
+
+        tick_count += 1
+        # Export bot state for dashboard every tick
+        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client)
 
         logger.debug("Sleeping %d s …", cfg.poll_interval)
-        # Sleep in small increments so we can honour shutdown quickly
         for _ in range(cfg.poll_interval):
             if _shutdown:
                 break
@@ -97,6 +113,106 @@ def run_loop(cfg: Config) -> None:
     logger.info("Bot stopped.")
     client.close()
     store.close()
+
+
+def _check_exits_only(
+    risk_mgr: RiskManager,
+    executor: ExecutionEngine,
+    portfolio: PortfolioTracker,
+    store: SQLiteStore,
+    client: PolymarketClient,
+    cfg: Config,
+) -> None:
+    """Check SL/TP on existing positions without scanning for new entries.
+
+    Used when circuit breaker is active — we still want to close losing
+    positions, but we don't want to open new ones.
+    """
+    tick_ts = iso_now()
+    for token_id, pos in list(portfolio.positions.items()):
+        current_price = client.get_price(token_id)
+        if current_price is None:
+            continue
+        exit_reason = ""
+        if risk_mgr.check_stop_loss(pos.entry_price, current_price):
+            exit_reason = "stop_loss"
+        elif risk_mgr.check_take_profit(pos.entry_price, current_price):
+            exit_reason = "take_profit"
+        if not exit_reason:
+            continue
+
+        close_side = "SELL" if pos.side == "BUY" else "BUY"
+        current_spread = client.get_spread(token_id) or 0.0
+        order = OrderRequest(
+            token_id=token_id, condition_id=pos.condition_id,
+            side=close_side, size=pos.size, price=current_price,
+            strategy=pos.strategy, spread=current_spread, exit_reason=exit_reason,
+        )
+        result = executor.execute(order)
+        if result.success:
+            pnl = portfolio.close_position(token_id, current_price)
+            risk_mgr.record_realized_pnl(pnl)
+            store.insert_decision(
+                timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
+                action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f} (circuit_breaker_mode)",
+                strategy=pos.strategy, price=current_price, spread=current_spread,
+            )
+
+
+def _export_bot_state(
+    cfg: Config,
+    portfolio: PortfolioTracker,
+    risk_mgr: RiskManager,
+    strategy: BaseStrategy,
+    tick_count: int,
+    client: PolymarketClient,
+) -> None:
+    """Write a JSON file with current bot state for the dashboard to consume."""
+    try:
+        positions_data = []
+        for pos in portfolio.positions.values():
+            current_price = client.get_price(pos.token_id)
+            positions_data.append({
+                "token_id": pos.token_id[:16],
+                "condition_id": pos.condition_id[:16],
+                "side": pos.side,
+                "size": round(pos.size, 4),
+                "entry_price": round(pos.entry_price, 4),
+                "current_price": round(current_price, 4) if current_price else None,
+                "unrealised_pnl": round(pos.unrealised_pnl(current_price), 4) if current_price else None,
+                "strategy": pos.strategy,
+            })
+
+        state = {
+            "timestamp": iso_now(),
+            "tick_count": tick_count,
+            "mode": "paper" if cfg.is_paper else "live",
+            "strategy": strategy.name,
+            "circuit_breaker_active": risk_mgr.is_circuit_breaker_active,
+            "daily_pnl": round(risk_mgr.daily_pnl, 4),
+            "portfolio": {
+                "open_positions": portfolio.open_position_count(),
+                "total_exposure": round(portfolio.total_exposure(), 2),
+                "realised_pnl": round(portfolio.realised_pnl, 4),
+            },
+            "config": {
+                "max_position_size": cfg.max_position_size,
+                "max_total_exposure": cfg.max_total_exposure,
+                "max_open_positions": cfg.max_open_positions,
+                "stop_loss_pct": cfg.stop_loss_pct,
+                "take_profit_pct": cfg.take_profit_pct,
+                "max_spread": cfg.max_spread,
+                "max_daily_loss": cfg.max_daily_loss,
+                "min_price": cfg.min_price,
+                "max_price": cfg.max_price,
+                "poll_interval": cfg.poll_interval,
+            },
+            "positions": positions_data,
+        }
+        with open("bot_state.json", "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        logger.debug("Failed to export bot state JSON.", exc_info=True)
 
 
 def _tick(
@@ -111,6 +227,7 @@ def _tick(
 ) -> None:
     """One iteration of the bot loop."""
 
+    tick_start = utc_timestamp()
     tick_ts = iso_now()
 
     # 1. Check stop-loss / take-profit on existing positions
@@ -147,6 +264,7 @@ def _tick(
         result = executor.execute(order)
         if result.success:
             pnl = portfolio.close_position(token_id, current_price)
+            risk_mgr.record_realized_pnl(pnl)
             store.insert_decision(
                 timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
                 action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f}",
@@ -226,12 +344,32 @@ def _tick(
                 signal_detail=sig.reason,
             )
 
-    # Log tick summary
+    # Log tick summary with timing
+    tick_duration = utc_timestamp() - tick_start
     summary = portfolio.summary(price_fn=client.get_price)
     logger.info(
-        "Tick complete: markets=%d, signals=%d, risk_rejected=%d, trades=%d | Portfolio: %s",
-        len(snapshots), signals_generated, risk_rejections, trades_executed, summary,
+        "Tick complete (%.1fs): markets=%d, signals=%d, risk_rejected=%d, trades=%d, daily_pnl=$%.2f | Portfolio: %s",
+        tick_duration, len(snapshots), signals_generated, risk_rejections, trades_executed,
+        risk_mgr.daily_pnl, summary,
     )
+
+    # Persist tick stats for dashboard and analysis
+    try:
+        store.insert_tick_stats(
+            timestamp=tick_ts,
+            duration_s=tick_duration,
+            markets_scanned=len(snapshots),
+            signals_generated=signals_generated,
+            risk_rejections=risk_rejections,
+            trades_executed=trades_executed,
+            open_positions=summary["open_positions"],
+            total_exposure=summary["total_exposure"],
+            realised_pnl=summary["realised_pnl"],
+            unrealised_pnl=summary["unrealised_pnl"],
+            daily_pnl=risk_mgr.daily_pnl,
+        )
+    except Exception:
+        logger.debug("Failed to insert tick stats.", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -13,3 +13,5 @@ dist/
 node_modules/
 .next/
 next-env.d.ts
+bot_state.json
+KILL_SWITCH

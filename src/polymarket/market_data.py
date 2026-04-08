@@ -31,6 +31,8 @@ class MarketSnapshot:
     volume: float
     liquidity: float
     active: bool
+    category: str = ""
+    end_date: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -77,6 +79,8 @@ class MarketDataService:
 
             volume = _safe_float(mkt.get("volume") or mkt.get("volumeNum"))
             liquidity = _safe_float(mkt.get("liquidity") or mkt.get("liquidityNum"))
+            category = mkt.get("category", "") or mkt.get("groupItemTitle", "") or ""
+            end_date = mkt.get("endDate") or mkt.get("end_date_iso") or ""
 
             for i, token_id in enumerate(tokens):
                 outcome_label = outcomes[i] if i < len(outcomes) else f"outcome_{i}"
@@ -90,6 +94,8 @@ class MarketDataService:
                     volume=volume,
                     liquidity=liquidity,
                     active=bool(mkt.get("active", True)),
+                    category=category,
+                    end_date=end_date,
                 )
                 snapshots.append(snap)
 
@@ -100,19 +106,28 @@ class MarketDataService:
         # Enrich with price/spread (limited to max_markets)
         enriched: list[MarketSnapshot] = []
         spread_rejected = 0
+        price_boundary_rejected = 0
+        invalid_price = 0
         for snap in filtered[: self.cfg.max_markets]:
             snap.price = self.client.get_price(snap.token_id)
             snap.spread = self.client.get_spread(snap.token_id)
             if not snap.is_valid:
+                invalid_price += 1
                 continue
             if not self._passes_spread_filter(snap):
                 spread_rejected += 1
-                logger.debug("Spread filter rejected %s (spread=%.4f > max=%.4f)", snap.token_id[:12], snap.spread or 0, self.cfg.max_spread)
+                continue
+            if not self._passes_price_boundary(snap):
+                price_boundary_rejected += 1
                 continue
             enriched.append(snap)
 
         if spread_rejected:
-            logger.info("Spread filter rejected %d markets (max_spread=%.4f).", spread_rejected, self.cfg.max_spread)
+            logger.info("Spread filter rejected %d markets.", spread_rejected)
+        if price_boundary_rejected:
+            logger.info("Price boundary filter rejected %d markets (min=%.2f, max=%.2f).", price_boundary_rejected, self.cfg.min_price, self.cfg.max_price)
+        if invalid_price:
+            logger.debug("No valid price for %d markets.", invalid_price)
         logger.info("Enriched %d valid market snapshots.", len(enriched))
         return enriched
 
@@ -130,3 +145,9 @@ class MarketDataService:
         if snap.spread is None:
             return True  # No spread data — allow (conservative: logged separately)
         return snap.spread <= self.cfg.max_spread
+
+    def _passes_price_boundary(self, snap: MarketSnapshot) -> bool:
+        """Reject prices near 0 or 1 where edge is minimal and risk is high."""
+        if snap.price is None:
+            return False
+        return self.cfg.min_price <= snap.price <= self.cfg.max_price

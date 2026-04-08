@@ -69,6 +69,22 @@ class SQLiteStore:
                 risk_detail     TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tick_stats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT NOT NULL,
+                duration_s      REAL NOT NULL,
+                markets_scanned INTEGER NOT NULL DEFAULT 0,
+                signals_generated INTEGER NOT NULL DEFAULT 0,
+                risk_rejections INTEGER NOT NULL DEFAULT 0,
+                trades_executed INTEGER NOT NULL DEFAULT 0,
+                open_positions  INTEGER NOT NULL DEFAULT 0,
+                total_exposure  REAL NOT NULL DEFAULT 0.0,
+                realised_pnl    REAL NOT NULL DEFAULT 0.0,
+                unrealised_pnl  REAL NOT NULL DEFAULT 0.0,
+                daily_pnl       REAL NOT NULL DEFAULT 0.0
+            )
+        """)
         self._conn.commit()
 
     def _migrate(self) -> None:
@@ -145,6 +161,30 @@ class SQLiteStore:
     def get_decisions(self, limit: int = 100) -> list[dict]:
         cur = self._conn.execute("SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(row) for row in cur.fetchall()]
+
+    # -- Tick stats ------------------------------------------------------------
+
+    def insert_tick_stats(
+        self,
+        timestamp: str,
+        duration_s: float,
+        markets_scanned: int = 0,
+        signals_generated: int = 0,
+        risk_rejections: int = 0,
+        trades_executed: int = 0,
+        open_positions: int = 0,
+        total_exposure: float = 0.0,
+        realised_pnl: float = 0.0,
+        unrealised_pnl: float = 0.0,
+        daily_pnl: float = 0.0,
+    ) -> None:
+        """Record per-tick aggregate statistics for observability."""
+        self._conn.execute(
+            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl),
+        )
+        self._conn.commit()
 
     # -- Price history ---------------------------------------------------------
 

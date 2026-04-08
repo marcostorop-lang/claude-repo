@@ -22,11 +22,16 @@ class Position:
     entry_price: float
     strategy: str
     order_id: str
+    entry_timestamp: str = ""
 
     def unrealised_pnl(self, current_price: float) -> float:
         if self.side == "BUY":
             return (current_price - self.entry_price) * self.size
         return (self.entry_price - current_price) * self.size
+
+    @property
+    def notional_exposure(self) -> float:
+        return self.size * self.entry_price
 
 
 @dataclass
@@ -58,7 +63,26 @@ class PortfolioTracker:
         return len(self.positions)
 
     def total_exposure(self) -> float:
-        return sum(p.size * p.entry_price for p in self.positions.values())
+        return sum(p.notional_exposure for p in self.positions.values())
+
+    def exposure_by_condition(self, condition_id_or_token: str) -> float:
+        """Total exposure for all positions sharing the same condition_id.
+
+        Accepts either a condition_id or token_id — looks up the condition_id
+        from an existing position with that token.
+        """
+        # Resolve the condition_id
+        cid = condition_id_or_token
+        for pos in self.positions.values():
+            if pos.token_id == condition_id_or_token:
+                cid = pos.condition_id
+                break
+
+        return sum(
+            p.notional_exposure
+            for p in self.positions.values()
+            if p.condition_id == cid
+        )
 
     def total_unrealised_pnl(self, price_fn) -> float:
         """Calculate total unrealised P&L using a callable that returns the current price for a token_id."""

@@ -66,3 +66,71 @@ All meaningful changes made by the AI Continuous Improvement process.
 - **Why**: Missing spread gate allowed illiquid trades; no duplicate prevention existed
 - **Risk**: Low — additional safety checks, no existing checks removed
 - **Validation**: Verify high-spread signals are rejected; verify duplicate signals are blocked
+
+---
+
+## 2026-04-08 — Risk Hardening & Dashboard Upgrade (Phase 2)
+
+### Code Changes
+
+#### 9. Daily max-loss circuit breaker (risk/manager.py)
+- **What**: `RiskManager` now tracks daily realized PnL; trips a circuit breaker when loss exceeds `MAX_DAILY_LOSS`; resets at midnight
+- **Why**: Without a circuit breaker, a bad day could blow through all paper capital. Essential for live readiness.
+- **Risk**: Low — only blocks new BUY orders; still allows SL/TP exits on existing positions
+- **Validation**: 5 new tests verify circuit breaker behavior
+
+#### 10. Per-event concentration limits (risk/manager.py, portfolio/tracker.py)
+- **What**: Risk check now enforces `MAX_EXPOSURE_PER_EVENT` — total exposure per condition_id. Added `exposure_by_condition()` to PortfolioTracker.
+- **Why**: Bot could load up on multiple YES tokens from the same event, creating hidden concentration risk
+- **Risk**: Low — additive check, no existing behavior changed
+- **Validation**: Tests verify same-event rejection and cross-event allowance
+
+#### 11. Price boundary filter (risk/manager.py, market_data.py)
+- **What**: Rejects markets with price < `MIN_PRICE` (0.05) or > `MAX_PRICE` (0.95)
+- **Why**: Near-zero and near-certain markets have minimal edge but high risk of resolution surprise
+- **Risk**: Low — conservative defaults, configurable
+- **Validation**: 5 new tests including exact boundary values
+
+#### 12. Kill-switch file mechanism (main.py)
+- **What**: Bot checks for `KILL_SWITCH` file at start of each tick; shuts down immediately if found
+- **Why**: Provides an emergency stop without needing to find the process ID; works across SSH sessions
+- **Risk**: None — only adds a file existence check
+- **Validation**: Manual: `touch KILL_SWITCH` stops the bot
+
+#### 13. Tick timing instrumentation (main.py, sqlite_store.py)
+- **What**: Each tick is timed; `tick_stats` table records duration, markets scanned, signals, rejections, trades, portfolio state
+- **Why**: Enables performance monitoring and anomaly detection
+- **Risk**: Low — additive logging, no execution change
+- **Validation**: Check tick_stats table after running
+
+#### 14. Bot state JSON export (main.py)
+- **What**: `bot_state.json` written after each tick with live portfolio, config, positions, circuit breaker status
+- **Why**: Dashboard can read actual bot state instead of hardcoding values
+- **Risk**: None — write-only side effect, ignored by git
+- **Validation**: Check bot_state.json after running; dashboard reads it
+
+#### 15. Dashboard upgrade (generate_dashboard.js)
+- **What**: Dashboard now reads `bot_state.json` for real config; shows open positions with unrealized PnL; shows spread-adjusted PnL; shows decision log stats (SL/TP exits, risk rejections); shows circuit breaker status
+- **Why**: Dashboard was lying about config and missing critical views
+- **Risk**: Low — backwards compatible, falls back to defaults if bot_state.json is missing
+- **Validation**: Generate dashboard, visually inspect new sections
+
+#### 16. Category and end_date extraction (market_data.py)
+- **What**: MarketSnapshot now captures `category` and `end_date` from Gamma API data
+- **Why**: Foundation for future category-based analysis and time-to-resolution filtering
+- **Risk**: None — additive fields with empty defaults
+- **Validation**: Check snapshot objects have category/end_date populated
+
+#### 17. New config parameters
+- `MAX_DAILY_LOSS` (default $50) — circuit breaker threshold
+- `MAX_EXPOSURE_PER_EVENT` (default $100) — per-event concentration limit
+- `MIN_PRICE` (default 0.05) — minimum price to trade
+- `MAX_PRICE` (default 0.95) — maximum price to trade
+- `STALE_PRICE_SECONDS` (default 300) — stale price threshold
+- `KILL_SWITCH_FILE` (default "KILL_SWITCH") — kill switch file path
+
+### New Tests (16 tests)
+- test_risk_hardening.py: Circuit breaker (5), concentration limits (2), price boundaries (5), duplicate prevention (2), spread check (2)
+
+### Test Results
+- 68 total tests: ALL PASSING (28 original + 24 from phase 1 + 16 new)

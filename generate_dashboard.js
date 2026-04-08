@@ -19,6 +19,49 @@ const db = new Database(DB_PATH, { readonly: true });
 function query(sql, params = []) { return db.prepare(sql).all(...params); }
 function queryOne(sql, params = []) { return db.prepare(sql).get(...params); }
 
+// Helper: check if table exists
+function tableExists(name) {
+  const r = queryOne("SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name]);
+  return !!r;
+}
+
+// === BOT STATE (from JSON export) ===
+const BOT_STATE_PATH = path.join(__dirname, "bot_state.json");
+let botState = null;
+try {
+  if (fs.existsSync(BOT_STATE_PATH)) {
+    botState = JSON.parse(fs.readFileSync(BOT_STATE_PATH, "utf-8"));
+  }
+} catch { botState = null; }
+
+// === DECISION LOG STATS ===
+let decisionStats = { entries: 0, exits_sl: 0, exits_tp: 0, risk_rejected: 0 };
+if (tableExists("decision_log")) {
+  const ds = queryOne("SELECT COUNT(*) as cnt FROM decision_log");
+  decisionStats.entries = ds ? ds.cnt : 0;
+  const sl = queryOne("SELECT COUNT(*) as cnt FROM decision_log WHERE action LIKE '%STOP_LOSS%'");
+  decisionStats.exits_sl = sl ? sl.cnt : 0;
+  const tp = queryOne("SELECT COUNT(*) as cnt FROM decision_log WHERE action LIKE '%TAKE_PROFIT%'");
+  decisionStats.exits_tp = tp ? tp.cnt : 0;
+  const rr = queryOne("SELECT COUNT(*) as cnt FROM decision_log WHERE action='RISK_REJECTED'");
+  decisionStats.risk_rejected = rr ? rr.cnt : 0;
+}
+
+// === TICK STATS ===
+let recentTicks = [];
+if (tableExists("tick_stats")) {
+  recentTicks = query("SELECT * FROM tick_stats ORDER BY id DESC LIMIT 50").reverse();
+}
+
+// === SPREAD-ADJUSTED PNL ===
+let spreadCost = 0;
+if (tableExists("trades")) {
+  try {
+    const sc = queryOne("SELECT SUM(spread_at_entry * size / 2.0) as cost FROM trades WHERE spread_at_entry > 0");
+    spreadCost = sc && sc.cost ? sc.cost : 0;
+  } catch { spreadCost = 0; }
+}
+
 // === OVERVIEW ===
 const total = queryOne("SELECT COUNT(*) as cnt FROM trades");
 const buys = query("SELECT token_id, price, size FROM trades WHERE side='BUY' ORDER BY timestamp");
@@ -256,6 +299,7 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     <a href="#trades">Trades</a>
     <a href="#markets">Markets</a>
     <a href="#strategies">Strategies</a>
+    <a href="#risk">Risk</a>
     <a href="#config">Config</a>
   </nav>
   <div class="ver">Polymarket Bot v1.0</div>
@@ -263,7 +307,7 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
 <div class="main">
 <div class="header">
   <span style="font-size:14px;color:#9ca3af">PolyBot Dashboard</span>
-  <div class="status"><div class="dot"></div> Paper Trading Mode</div>
+  <div class="status"><div class="dot"></div> ${botState ? botState.mode.toUpperCase() + ' Mode' : 'Paper Trading Mode'}${botState && botState.circuit_breaker_active ? ' | <span style="color:#ef4444">CIRCUIT BREAKER</span>' : ''}</div>
 </div>
 <div class="content">
 
@@ -345,23 +389,69 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
 
 <div class="divider"></div>
 
+<div class="section" id="risk">
+  <h2>Risk & Decisions</h2>
+  <div class="grid4">
+    <div class="card"><div class="stat-val red">$${spreadCost.toFixed(2)}</div><div class="stat-label">Est. Spread Cost</div></div>
+    <div class="card"><div class="stat-val" style="color:${(o.total_pnl - spreadCost) >= 0 ? '#22c55e' : '#ef4444'}">$${(o.total_pnl - spreadCost).toFixed(2)}</div><div class="stat-label">Spread-Adjusted PnL</div></div>
+    <div class="card"><div class="stat-val white">${decisionStats.risk_rejected}</div><div class="stat-label">Risk Rejections</div></div>
+    <div class="card"><div class="stat-val white">${decisionStats.exits_sl + decisionStats.exits_tp}</div><div class="stat-label">SL/TP Exits</div></div>
+  </div>
+  <div class="grid4">
+    <div class="card"><div class="stat-val red">${decisionStats.exits_sl}</div><div class="stat-label">Stop-Loss Exits</div></div>
+    <div class="card"><div class="stat-val green">${decisionStats.exits_tp}</div><div class="stat-label">Take-Profit Exits</div></div>
+    <div class="card"><div class="stat-val white">${decisionStats.entries}</div><div class="stat-label">Total Decisions</div></div>
+    <div class="card"><div class="stat-val white">${botState ? botState.tick_count : '-'}</div><div class="stat-label">Ticks Completed</div></div>
+  </div>
+</div>
+
+<div class="divider"></div>
+
+${botState && botState.positions && botState.positions.length > 0 ? `
+<div class="section" id="open-positions">
+  <h2>Open Positions (${botState.positions.length})</h2>
+  <div class="card overflow-x" style="padding:0">
+    <table>
+      <thead><tr><th>Token</th><th>Side</th><th>Strategy</th><th class="text-right">Size</th><th class="text-right">Entry</th><th class="text-right">Current</th><th class="text-right">Unreal. PnL</th></tr></thead>
+      <tbody>${botState.positions.map(pp => {
+        const upnlColor = pp.unrealised_pnl >= 0 ? '#22c55e' : '#ef4444';
+        return `<tr>
+          <td style="font-family:monospace;font-size:12px">${pp.token_id}</td>
+          <td><span class="badge badge-buy">${pp.side}</span></td>
+          <td style="color:#d1d5db">${pp.strategy}</td>
+          <td class="text-right mono">${pp.size.toFixed(2)}</td>
+          <td class="text-right mono">${pp.entry_price.toFixed(4)}</td>
+          <td class="text-right mono">${pp.current_price ? pp.current_price.toFixed(4) : '-'}</td>
+          <td class="text-right mono" style="color:${upnlColor}">${pp.unrealised_pnl ? '$' + pp.unrealised_pnl.toFixed(2) : '-'}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>
+  </div>
+</div>
+<div class="divider"></div>
+` : ''}
+
 <div class="section" id="config">
-  <h2>Configuration</h2>
+  <h2>Configuration${botState ? ' (live from bot)' : ' (defaults)'}</h2>
   <div class="grid2">
     <div class="card">
       <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Trading</h3>
-      <div class="config-row"><span class="key">Trading Mode</span><span class="val" style="color:#60a5fa">PAPER</span></div>
-      <div class="config-row"><span class="key">Live Trading</span><span class="val" style="color:#22c55e">false</span></div>
-      <div class="config-row"><span class="key">Poll Interval</span><span class="val">30s</span></div>
-      <div class="config-row"><span class="key">Strategy</span><span class="val">both</span></div>
+      <div class="config-row"><span class="key">Trading Mode</span><span class="val" style="color:#60a5fa">${botState ? botState.mode.toUpperCase() : 'PAPER'}</span></div>
+      <div class="config-row"><span class="key">Circuit Breaker</span><span class="val" style="color:${botState && botState.circuit_breaker_active ? '#ef4444' : '#22c55e'}">${botState ? (botState.circuit_breaker_active ? 'ACTIVE' : 'OK') : '-'}</span></div>
+      <div class="config-row"><span class="key">Daily PnL</span><span class="val">${botState ? '$' + botState.daily_pnl.toFixed(2) : '-'}</span></div>
+      <div class="config-row"><span class="key">Poll Interval</span><span class="val">${botState ? botState.config.poll_interval + 's' : '-'}</span></div>
+      <div class="config-row"><span class="key">Strategy</span><span class="val">${botState ? botState.strategy : '-'}</span></div>
     </div>
     <div class="card">
       <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Risk Management</h3>
-      <div class="config-row"><span class="key">Max Position Size</span><span class="val">$50</span></div>
-      <div class="config-row"><span class="key">Max Exposure</span><span class="val">$500</span></div>
-      <div class="config-row"><span class="key">Stop Loss</span><span class="val">10%</span></div>
-      <div class="config-row"><span class="key">Take Profit</span><span class="val">15%</span></div>
-      <div class="config-row"><span class="key">Max Open Positions</span><span class="val">10</span></div>
+      <div class="config-row"><span class="key">Max Position Size</span><span class="val">$${botState ? botState.config.max_position_size : '50'}</span></div>
+      <div class="config-row"><span class="key">Max Exposure</span><span class="val">$${botState ? botState.config.max_total_exposure : '200'}</span></div>
+      <div class="config-row"><span class="key">Stop Loss</span><span class="val">${botState ? (botState.config.stop_loss_pct * 100).toFixed(0) : '10'}%</span></div>
+      <div class="config-row"><span class="key">Take Profit</span><span class="val">${botState ? (botState.config.take_profit_pct * 100).toFixed(0) : '20'}%</span></div>
+      <div class="config-row"><span class="key">Max Open Positions</span><span class="val">${botState ? botState.config.max_open_positions : '5'}</span></div>
+      <div class="config-row"><span class="key">Max Daily Loss</span><span class="val">$${botState ? botState.config.max_daily_loss : '50'}</span></div>
+      <div class="config-row"><span class="key">Max Spread</span><span class="val">${botState ? botState.config.max_spread : '0.15'}</span></div>
+      <div class="config-row"><span class="key">Price Range</span><span class="val">${botState ? botState.config.min_price + ' - ' + botState.config.max_price : '0.05 - 0.95'}</span></div>
     </div>
   </div>
 </div>
