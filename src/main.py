@@ -392,19 +392,24 @@ def cmd_run_bot():
 
 @cli.command("backfill-markets")
 def cmd_backfill():
-    """Download active markets and cache them locally."""
+    """Download active markets and cache them locally.
+
+    Uses the configured MAX_MARKETS_FETCH cap to avoid fetching tens of
+    thousands of markets (Polymarket has 51K+ active markets; fetching all
+    of them blocks for a long time and is unnecessary for paper trading).
+    """
     cfg = Config()
     setup_logging(cfg.log_level, cfg.log_file)
     client = PolymarketClient(cfg)
     store = SQLiteStore(cfg.sqlite_db_path)
 
-    markets = client.get_all_active_markets()
+    markets = client.get_active_markets_limited(max_total=cfg.max_markets_fetch)
     for mkt in markets:
         cid = mkt.get("conditionId") or mkt.get("condition_id", "")
         question = mkt.get("question", "")
         store.upsert_market(cid, question, json.dumps(mkt), iso_now())
 
-    click.echo(f"Cached {len(markets)} markets.")
+    click.echo(f"Cached {len(markets)} markets (capped at {cfg.max_markets_fetch}).")
     client.close()
     store.close()
 

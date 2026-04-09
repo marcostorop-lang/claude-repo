@@ -47,7 +47,8 @@ if not exist .env (
     echo [OK] Archivo .env ya existe.
 )
 
-echo [4/4] Descargando mercados de Polymarket...
+echo [4/4] Descargando mercados iniciales de Polymarket (limitado)...
+echo       (Esto solo cachea una muestra. El bot descarga mercados cada tick.)
 python -m src.main backfill-markets
 
 echo.

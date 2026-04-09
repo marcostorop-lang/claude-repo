@@ -42,7 +42,8 @@ else
     echo "[OK] .env already exists."
 fi
 
-echo "[4/4] Downloading markets from Polymarket..."
+echo "[4/4] Caching initial markets from Polymarket (capped)..."
+echo "      (This only caches a sample. The bot fetches markets per tick.)"
 python3 -m src.main backfill-markets
 
 echo ""
