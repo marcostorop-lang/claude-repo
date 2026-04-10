@@ -75,8 +75,10 @@ class Config:
 
     # -- Strategy --------------------------------------------------------------
     strategy: str = field(default_factory=lambda: _env("STRATEGY", "simple_momentum"))
-    momentum_window: int = field(default_factory=lambda: _env_int("MOMENTUM_WINDOW", 5))
-    momentum_threshold: float = field(default_factory=lambda: _env_float("MOMENTUM_THRESHOLD", 0.03))
+    # Defaults tuned for faster warmup on a cold DB (was 5/0.03 which required
+    # 5+ ticks of history per token before any signal could fire).
+    momentum_window: int = field(default_factory=lambda: _env_int("MOMENTUM_WINDOW", 3))
+    momentum_threshold: float = field(default_factory=lambda: _env_float("MOMENTUM_THRESHOLD", 0.02))
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))

@@ -28,6 +28,9 @@ class OrderRequest:
     strategy: str
     spread: float = 0.0
     exit_reason: str = ""
+    # When True, ``price`` is already a side-of-book price (best_ask for BUY,
+    # best_bid for SELL) so the paper engine should NOT add further slippage.
+    is_book_price: bool = False
 
 
 @dataclass
@@ -59,12 +62,23 @@ class ExecutionEngine:
     def _paper_execute(self, order: OrderRequest) -> OrderResult:
         import uuid
 
-        # Simulate slippage: BUY at mid + half_spread, SELL at mid - half_spread
-        half_spread = order.spread / 2.0 if order.spread > 0 else 0.0
-        if order.side == "BUY":
-            fill_price = order.price + half_spread
+        # Slippage simulation.
+        #
+        # If the caller already resolved the side-of-book price (best_ask for
+        # BUY, best_bid for SELL), ``is_book_price`` is True and we use it as
+        # the fill directly — adding further half-spread would double-count.
+        #
+        # If we only have a midpoint (book unavailable), we fall back to the
+        # classical half-spread slippage approximation.
+        if order.is_book_price:
+            half_spread = 0.0
+            fill_price = max(order.price, 0.0001)
         else:
-            fill_price = max(order.price - half_spread, 0.0001)
+            half_spread = order.spread / 2.0 if order.spread > 0 else 0.0
+            if order.side == "BUY":
+                fill_price = order.price + half_spread
+            else:
+                fill_price = max(order.price - half_spread, 0.0001)
 
         order_id = f"paper-{uuid.uuid4().hex[:12]}"
         self.store.insert_trade(

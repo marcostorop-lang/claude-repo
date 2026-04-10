@@ -77,6 +77,30 @@ class TestPaperExecution:
         trades = store.get_trades(limit=1)
         assert trades[0]["exit_reason"] == "stop_loss"
 
+    def test_paper_book_price_skips_extra_slippage(self, engine):
+        """When the caller supplies an already-book-side price, paper execution
+        must NOT add another half-spread on top (avoids double-counting)."""
+        eng, store = engine
+        # order.price is already best_ask = 0.52, spread is the real book spread.
+        order = OrderRequest(
+            "t1", "c1", "BUY", 10.0, 0.52, "test",
+            spread=0.04, is_book_price=True,
+        )
+        result = eng.execute(order)
+        trades = store.get_trades(limit=1)
+        # Fill must be exactly the supplied price, not 0.52 + 0.02
+        assert trades[0]["price"] == pytest.approx(0.52)
+
+    def test_paper_book_price_sell_exact(self, engine):
+        eng, store = engine
+        order = OrderRequest(
+            "t1", "c1", "SELL", 10.0, 0.48, "test",
+            spread=0.04, is_book_price=True,
+        )
+        result = eng.execute(order)
+        trades = store.get_trades(limit=1)
+        assert trades[0]["price"] == pytest.approx(0.48)
+
     def test_live_blocked_in_paper_mode(self, engine):
         eng, store = engine
         # Force config to not-live

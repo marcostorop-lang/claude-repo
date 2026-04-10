@@ -36,27 +36,43 @@ class MeanReversion(BaseStrategy):
             return Signal(Action.HOLD, 0.0, "No price available.")
 
         if len(price_history) < self.window:
-            return Signal(Action.HOLD, 0.0, "Not enough history.")
+            return Signal(
+                Action.HOLD, 0.0, "Not enough history.",
+                features={"history_len": len(price_history), "window": self.window},
+            )
 
         window = list(price_history[-self.window :])
         z = z_score(snapshot.price, window)
+        from src.utils.math_utils import mean, stdev
+        features = {
+            "z_score": z,
+            "window_mean": mean(window),
+            "window_stdev": stdev(window),
+            "window": self.window,
+            "entry_z": self.entry_z,
+            "current_price": snapshot.price,
+            "spread": snapshot.spread,
+            "history_len": len(price_history),
+        }
 
         if z < -self.entry_z:
             return Signal(
                 Action.BUY,
                 min(abs(z) / self.entry_z, 1.0),
                 f"Mean-reversion BUY: z={z:.2f}",
+                features=features,
             )
         if z > self.entry_z:
             return Signal(
                 Action.SELL,
                 min(abs(z) / self.entry_z, 1.0),
                 f"Mean-reversion SELL: z={z:.2f}",
+                features=features,
             )
         if abs(z) < self.exit_z:
             return Signal(
-                Action.HOLD,
-                0.0,
+                Action.HOLD, 0.0,
                 f"Mean-reversion near mean: z={z:.2f}, consider closing.",
+                features=features,
             )
-        return Signal(Action.HOLD, 0.0, f"z={z:.2f}, within bands.")
+        return Signal(Action.HOLD, 0.0, f"z={z:.2f}, within bands.", features=features)

@@ -31,21 +31,37 @@ class SimpleMomentum(BaseStrategy):
         price_history: Sequence[float],
     ) -> Signal:
         if len(price_history) < self.window:
-            return Signal(Action.HOLD, 0.0, "Not enough history.")
+            return Signal(
+                Action.HOLD, 0.0, "Not enough history.",
+                features={"history_len": len(price_history), "window": self.window},
+            )
 
         recent = list(price_history[-self.window :])
         change = pct_change(recent[0], recent[-1])
+        features = {
+            "momentum": change,
+            "window": self.window,
+            "threshold": self.threshold,
+            "history_len": len(price_history),
+            "current_price": snapshot.price,
+            "spread": snapshot.spread,
+        }
 
         if change > self.threshold:
             return Signal(
                 Action.BUY,
                 min(abs(change) / self.threshold, 1.0),
                 f"Momentum +{change:.2%} over {self.window} ticks.",
+                features=features,
             )
         if change < -self.threshold:
             return Signal(
                 Action.SELL,
                 min(abs(change) / self.threshold, 1.0),
                 f"Momentum {change:.2%} over {self.window} ticks.",
+                features=features,
             )
-        return Signal(Action.HOLD, 0.0, f"No momentum ({change:.2%}).")
+        return Signal(
+            Action.HOLD, 0.0, f"No momentum ({change:.2%}).",
+            features=features,
+        )

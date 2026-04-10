@@ -20,6 +20,7 @@ import time
 import click
 from tabulate import tabulate
 
+from src.backtest.engine import Backtester, load_price_histories_from_store, save_report
 from src.config import Config
 from src.logger import setup_logging
 from src.polymarket.client import PolymarketClient
@@ -150,12 +151,22 @@ def _check_exits_only(
         )
         result = executor.execute(order)
         if result.success:
+            entry_price = pos.entry_price
             pnl = portfolio.close_position(token_id, current_price)
             risk_mgr.record_realized_pnl(pnl)
+            return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
             store.insert_decision(
                 timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
                 action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f} (circuit_breaker_mode)",
                 strategy=pos.strategy, price=current_price, spread=current_spread,
+            )
+            store.update_calibration_exit(
+                token_id=token_id,
+                exit_timestamp=tick_ts,
+                exit_price=current_price,
+                exit_reason=exit_reason,
+                pnl=pnl,
+                return_pct=return_pct,
             )
 
 
@@ -263,12 +274,22 @@ def _tick(
         )
         result = executor.execute(order)
         if result.success:
+            entry_price = pos.entry_price
             pnl = portfolio.close_position(token_id, current_price)
             risk_mgr.record_realized_pnl(pnl)
+            return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
             store.insert_decision(
                 timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
                 action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f}",
                 strategy=pos.strategy, price=current_price, spread=current_spread,
+            )
+            store.update_calibration_exit(
+                token_id=token_id,
+                exit_timestamp=tick_ts,
+                exit_price=current_price,
+                exit_reason=exit_reason,
+                pnl=pnl,
+                return_pct=return_pct,
             )
 
     # 2. Fetch market snapshots
@@ -279,19 +300,33 @@ def _tick(
     signals_generated = 0
     risk_rejections = 0
     trades_executed = 0
+    skip_already_open = 0
+    skip_no_price = 0
+    skip_insufficient_history = 0
+    skip_hold = 0
 
     for snap in snapshots:
         if snap.token_id in portfolio.positions:
+            skip_already_open += 1
             continue  # already have a position
 
         # Record price
         if snap.price is not None:
             store.insert_price(snap.token_id, snap.price, tick_ts)
+        else:
+            skip_no_price += 1
+            continue
 
         history = store.get_price_history(snap.token_id)
         sig = strategy.evaluate(snap, history)
 
         if sig.action == Action.HOLD:
+            # Split HOLD reasons for diagnostics — warmup vs no-signal
+            reason_lc = sig.reason.lower()
+            if "not enough history" in reason_lc or "history" in reason_lc and "len" in str(sig.features):
+                skip_insufficient_history += 1
+            else:
+                skip_hold += 1
             continue
 
         signals_generated += 1
@@ -308,18 +343,48 @@ def _tick(
                 strategy=strategy.name, confidence=sig.confidence,
                 price=snap.price or 0, spread=snap.spread or 0,
                 signal_detail=sig.reason, risk_detail=verdict.reason,
+                features=sig.features,
             )
             continue
 
-        # 5. Execute
+        # 5. Fetch top-of-book for the winning signal so execution uses the
+        #    real ask (for BUY) / bid (for SELL) instead of the midpoint.
+        #    Fall back to midpoint + half-spread if the book fetch fails.
+        exec_price = snap.price or 0.0
+        exec_spread = snap.spread or 0.0
+        is_book_price = False
+        book = client.get_top_of_book(snap.token_id)
+        if book is not None:
+            real_spread = book["best_ask"] - book["best_bid"]
+            if sig.action == Action.BUY:
+                exec_price = book["best_ask"]
+            else:
+                exec_price = book["best_bid"]
+            exec_spread = real_spread
+            is_book_price = True
+            # Second-chance spread gate using the real book
+            if real_spread > cfg.max_spread:
+                risk_rejections += 1
+                store.insert_decision(
+                    timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                    action="RISK_REJECTED", reason=f"Book spread {real_spread:.4f} exceeds max",
+                    strategy=strategy.name, confidence=sig.confidence,
+                    price=exec_price, spread=real_spread,
+                    signal_detail=sig.reason, risk_detail="book_spread",
+                    features=sig.features,
+                )
+                continue
+
+        # 6. Execute
         order = OrderRequest(
             token_id=snap.token_id,
             condition_id=snap.condition_id,
             side=sig.action.value,
             size=verdict.adjusted_size,
-            price=snap.price or 0,
+            price=exec_price,
             strategy=strategy.name,
-            spread=snap.spread or 0.0,
+            spread=exec_spread,
+            is_book_price=is_book_price,
         )
         result = executor.execute(order)
 
@@ -334,6 +399,7 @@ def _tick(
                     entry_price=snap.price or 0,
                     strategy=strategy.name,
                     order_id=result.order_id,
+                    entry_timestamp=tick_ts,
                 )
             )
             store.insert_decision(
@@ -342,14 +408,27 @@ def _tick(
                 strategy=strategy.name, confidence=sig.confidence,
                 price=snap.price or 0, spread=snap.spread or 0,
                 signal_detail=sig.reason,
+                features=sig.features,
+            )
+            # Record a calibration entry so we can later measure predicted
+            # confidence vs realised outcome.
+            store.insert_calibration_entry(
+                entry_timestamp=tick_ts,
+                token_id=snap.token_id,
+                strategy=strategy.name,
+                confidence=sig.confidence,
+                entry_price=snap.price or 0,
+                features=sig.features,
             )
 
-    # Log tick summary with timing
+    # Log tick summary with timing and per-reason counters
     tick_duration = utc_timestamp() - tick_start
     summary = portfolio.summary(price_fn=client.get_price)
     logger.info(
-        "Tick complete (%.1fs): markets=%d, signals=%d, risk_rejected=%d, trades=%d, daily_pnl=$%.2f | Portfolio: %s",
+        "Tick complete (%.1fs): markets=%d, signals=%d, risk_rejected=%d, trades=%d | "
+        "skip: warmup=%d, already_open=%d, no_price=%d, hold=%d | daily_pnl=$%.2f | Portfolio: %s",
         tick_duration, len(snapshots), signals_generated, risk_rejections, trades_executed,
+        skip_insufficient_history, skip_already_open, skip_no_price, skip_hold,
         risk_mgr.daily_pnl, summary,
     )
 
@@ -367,6 +446,9 @@ def _tick(
             realised_pnl=summary["realised_pnl"],
             unrealised_pnl=summary["unrealised_pnl"],
             daily_pnl=risk_mgr.daily_pnl,
+            skip_warmup=skip_insufficient_history,
+            skip_no_price=skip_no_price,
+            skip_hold=skip_hold,
         )
     except Exception:
         logger.debug("Failed to insert tick stats.", exc_info=True)
@@ -458,6 +540,94 @@ def cmd_trades(limit: int):
         for t in trades
     ]
     click.echo(tabulate(rows, headers=["Order ID", "Side", "Size", "Price", "Mode", "Strategy", "Time"]))
+    store.close()
+
+
+@cli.command("backtest")
+@click.option("--strategy", default=None, help="Strategy to test (defaults to config).")
+@click.option("--min-points", default=5, help="Minimum price points per token.")
+@click.option("--spread", default=0.02, help="Assumed spread for slippage.")
+@click.option("--output", default="backtest_report.json", help="Output JSON path.")
+def cmd_backtest(strategy: str, min_points: int, spread: float, output: str):
+    """Replay historical price_history through a strategy and report PnL.
+
+    Reads price_history from SQLite, replays each token independently, and
+    writes a JSON report with per-trade detail. No API calls are made.
+    """
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    if strategy:
+        # Override strategy in-place by building a new Config via env
+        os.environ["STRATEGY"] = strategy
+        cfg = Config()
+
+    store = SQLiteStore(cfg.sqlite_db_path)
+    strat = _build_strategy(cfg)
+
+    histories = load_price_histories_from_store(store, min_points=min_points)
+    if not histories:
+        click.echo(f"No price histories with >= {min_points} points. Let the bot run first to collect prices.")
+        store.close()
+        return
+
+    click.echo(f"Replaying {len(histories)} tokens with strategy={strat.name}, spread={spread}...")
+    bt = Backtester(cfg, strat, assumed_spread=spread)
+    report = bt.run(histories)
+    click.echo("\n" + report.summary())
+    save_report(report, output)
+    click.echo(f"\nFull report written to {output}")
+    store.close()
+
+
+@cli.command("calibration-report")
+@click.option("--bins", default=5, help="Number of confidence bins.")
+def cmd_calibration(bins: int):
+    """Report calibration of strategy confidence vs realised PnL.
+
+    Reads decision_log entries with action=ENTRY_BUY, joins them with
+    subsequent exits (EXIT_STOP_LOSS / EXIT_TAKE_PROFIT) on the same
+    token, and bins by predicted confidence.
+    """
+    from src.analysis.calibration import calibration_report
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    table = calibration_report(store, n_bins=bins)
+    if not table:
+        click.echo("No matched entry/exit pairs in decision_log yet.")
+        store.close()
+        return
+    click.echo(tabulate(table, headers="keys", floatfmt=".4f"))
+    store.close()
+
+
+@cli.command("show-positions-detail")
+def cmd_positions_detail():
+    """Analyze currently open positions with time-in-position and live PnL."""
+    from src.tools.analyze_positions import analyze_open_positions
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    client = PolymarketClient(cfg)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    rows = analyze_open_positions(store, client)
+    if not rows:
+        click.echo("No open positions found in the trade history.")
+    else:
+        click.echo(tabulate(rows, headers="keys", floatfmt=".4f"))
+    client.close()
+    store.close()
+
+
+@cli.command("run-experiments")
+@click.argument("manifest", default="experiments/manifest.json")
+def cmd_experiments(manifest: str):
+    """Run a batch of backtests defined in a JSON manifest."""
+    from src.experiments.runner import run_manifest
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    result = run_manifest(manifest, cfg, store)
+    click.echo(result)
     store.close()
 
 

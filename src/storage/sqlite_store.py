@@ -66,7 +66,24 @@ class SQLiteStore:
                 price           REAL,
                 spread          REAL,
                 signal_detail   TEXT,
-                risk_detail     TEXT
+                risk_detail     TEXT,
+                features        TEXT DEFAULT '{}'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS calibration (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_timestamp TEXT NOT NULL,
+                exit_timestamp  TEXT,
+                token_id        TEXT NOT NULL,
+                strategy        TEXT,
+                confidence      REAL NOT NULL,
+                entry_price     REAL NOT NULL,
+                exit_price      REAL,
+                exit_reason     TEXT,
+                pnl             REAL,
+                return_pct      REAL,
+                features        TEXT DEFAULT '{}'
             )
         """)
         cur.execute("""
@@ -82,7 +99,10 @@ class SQLiteStore:
                 total_exposure  REAL NOT NULL DEFAULT 0.0,
                 realised_pnl    REAL NOT NULL DEFAULT 0.0,
                 unrealised_pnl  REAL NOT NULL DEFAULT 0.0,
-                daily_pnl       REAL NOT NULL DEFAULT 0.0
+                daily_pnl       REAL NOT NULL DEFAULT 0.0,
+                skip_warmup     INTEGER NOT NULL DEFAULT 0,
+                skip_no_price   INTEGER NOT NULL DEFAULT 0,
+                skip_hold       INTEGER NOT NULL DEFAULT 0
             )
         """)
         self._conn.commit()
@@ -90,7 +110,7 @@ class SQLiteStore:
     def _migrate(self) -> None:
         """Add columns to existing tables if missing (backwards-compatible)."""
         cur = self._conn.cursor()
-        # Check existing columns on trades table
+        # trades
         existing = {row[1] for row in cur.execute("PRAGMA table_info(trades)").fetchall()}
         migrations = {
             "exit_reason": "ALTER TABLE trades ADD COLUMN exit_reason TEXT DEFAULT ''",
@@ -100,6 +120,18 @@ class SQLiteStore:
             if col not in existing:
                 cur.execute(sql)
                 logger.info("Migrated trades table: added column '%s'", col)
+        # decision_log: add features column if missing (older DBs)
+        existing_dl = {row[1] for row in cur.execute("PRAGMA table_info(decision_log)").fetchall()}
+        if existing_dl and "features" not in existing_dl:
+            cur.execute("ALTER TABLE decision_log ADD COLUMN features TEXT DEFAULT '{}'")
+            logger.info("Migrated decision_log: added column 'features'")
+        # tick_stats: add skip counters if missing (older DBs)
+        existing_ts = {row[1] for row in cur.execute("PRAGMA table_info(tick_stats)").fetchall()}
+        if existing_ts:
+            for col in ("skip_warmup", "skip_no_price", "skip_hold"):
+                if col not in existing_ts:
+                    cur.execute(f"ALTER TABLE tick_stats ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                    logger.info("Migrated tick_stats: added column '%s'", col)
         self._conn.commit()
 
     # -- Trades ----------------------------------------------------------------
@@ -149,17 +181,70 @@ class SQLiteStore:
         spread: float = 0.0,
         signal_detail: str = "",
         risk_detail: str = "",
+        features: dict | None = None,
     ) -> None:
-        """Record a trade decision (entry, exit, skip, rejection) for audit."""
+        """Record a trade decision (entry, exit, skip, rejection) for audit.
+
+        ``features`` is serialised to JSON and stored in the ``features``
+        column so downstream analysis can correlate features with outcomes.
+        """
+        import json
+        features_json = json.dumps(features or {}, default=str)
         self._conn.execute(
-            "INSERT INTO decision_log (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, risk_detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, risk_detail),
+            "INSERT INTO decision_log (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, risk_detail, features) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, risk_detail, features_json),
         )
         self._conn.commit()
 
     def get_decisions(self, limit: int = 100) -> list[dict]:
         cur = self._conn.execute("SELECT * FROM decision_log ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(row) for row in cur.fetchall()]
+
+    # -- Calibration -----------------------------------------------------------
+
+    def insert_calibration_entry(
+        self,
+        entry_timestamp: str,
+        token_id: str,
+        strategy: str,
+        confidence: float,
+        entry_price: float,
+        features: dict | None = None,
+    ) -> int:
+        """Record a new open position for calibration tracking. Returns the row id."""
+        import json
+        features_json = json.dumps(features or {}, default=str)
+        cur = self._conn.execute(
+            "INSERT INTO calibration (entry_timestamp, token_id, strategy, confidence, entry_price, features) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (entry_timestamp, token_id, strategy, confidence, entry_price, features_json),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def update_calibration_exit(
+        self,
+        token_id: str,
+        exit_timestamp: str,
+        exit_price: float,
+        exit_reason: str,
+        pnl: float,
+        return_pct: float,
+    ) -> None:
+        """Close the latest open calibration entry for a token."""
+        self._conn.execute(
+            "UPDATE calibration SET exit_timestamp=?, exit_price=?, exit_reason=?, pnl=?, return_pct=? "
+            "WHERE id = (SELECT id FROM calibration WHERE token_id=? AND exit_timestamp IS NULL ORDER BY id DESC LIMIT 1)",
+            (exit_timestamp, exit_price, exit_reason, pnl, return_pct, token_id),
+        )
+        self._conn.commit()
+
+    def get_calibration_closed(self) -> list[dict]:
+        """Return all closed calibration entries (entries with a recorded exit)."""
+        cur = self._conn.execute(
+            "SELECT * FROM calibration WHERE exit_timestamp IS NOT NULL ORDER BY id ASC"
+        )
         return [dict(row) for row in cur.fetchall()]
 
     # -- Tick stats ------------------------------------------------------------
@@ -177,12 +262,15 @@ class SQLiteStore:
         realised_pnl: float = 0.0,
         unrealised_pnl: float = 0.0,
         daily_pnl: float = 0.0,
+        skip_warmup: int = 0,
+        skip_no_price: int = 0,
+        skip_hold: int = 0,
     ) -> None:
         """Record per-tick aggregate statistics for observability."""
         self._conn.execute(
-            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl),
+            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold),
         )
         self._conn.commit()
 

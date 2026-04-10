@@ -1,0 +1,59 @@
+{
+  "name": "baseline_comparison",
+  "description": "Compare momentum with different windows/thresholds and mean-reversion baseline on the current price history.",
+  "experiments": [
+    {
+      "id": "mom_w3_t02",
+      "strategy": "simple_momentum",
+      "params": {
+        "MOMENTUM_WINDOW": "3",
+        "MOMENTUM_THRESHOLD": "0.02",
+        "STOP_LOSS_PCT": "0.10",
+        "TAKE_PROFIT_PCT": "0.15",
+        "MIN_PRICE": "0.05",
+        "MAX_PRICE": "0.95",
+        "MAX_POSITION_SIZE": "50"
+      }
+    },
+    {
+      "id": "mom_w5_t03",
+      "strategy": "simple_momentum",
+      "params": {
+        "MOMENTUM_WINDOW": "5",
+        "MOMENTUM_THRESHOLD": "0.03",
+        "STOP_LOSS_PCT": "0.10",
+        "TAKE_PROFIT_PCT": "0.15",
+        "MIN_PRICE": "0.05",
+        "MAX_PRICE": "0.95",
+        "MAX_POSITION_SIZE": "50"
+      }
+    },
+    {
+      "id": "mom_w3_t01_tight_sl",
+      "strategy": "simple_momentum",
+      "params": {
+        "MOMENTUM_WINDOW": "3",
+        "MOMENTUM_THRESHOLD": "0.01",
+        "STOP_LOSS_PCT": "0.05",
+        "TAKE_PROFIT_PCT": "0.10",
+        "MIN_PRICE": "0.05",
+        "MAX_PRICE": "0.95",
+        "MAX_POSITION_SIZE": "50"
+      }
+    },
+    {
+      "id": "mr_w5_z15",
+      "strategy": "mean_reversion",
+      "params": {
+        "MEAN_REVERSION_WINDOW": "5",
+        "MEAN_REVERSION_ENTRY_Z": "1.5",
+        "MEAN_REVERSION_EXIT_Z": "0.5",
+        "STOP_LOSS_PCT": "0.10",
+        "TAKE_PROFIT_PCT": "0.15",
+        "MIN_PRICE": "0.05",
+        "MAX_PRICE": "0.95",
+        "MAX_POSITION_SIZE": "50"
+      }
+    }
+  ]
+}

@@ -158,6 +158,58 @@ class PolymarketClient:
         """Return the last/midpoint price for a token."""
         return self.get_midpoint(token_id)
 
+    def get_top_of_book(self, token_id: str) -> dict | None:
+        """Return ``{"best_bid", "best_ask", "bid_size", "ask_size"}``.
+
+        Extracted from the CLOB order book. Returns ``None`` on any failure
+        so callers can fall back to the midpoint.
+
+        NB: We intentionally only fetch this right before execution — fetching
+        it for every scanned market would be prohibitively expensive.
+        """
+        book = self.get_order_book(token_id)
+        if not book:
+            return None
+        try:
+            bids = getattr(book, "bids", None) or (book.get("bids") if isinstance(book, dict) else None) or []
+            asks = getattr(book, "asks", None) or (book.get("asks") if isinstance(book, dict) else None) or []
+            if not bids or not asks:
+                return None
+
+            def _lvl(level):
+                # CLOB SDK may return an OrderSummary object or a dict
+                price = getattr(level, "price", None)
+                size = getattr(level, "size", None)
+                if price is None and isinstance(level, dict):
+                    price = level.get("price")
+                    size = level.get("size")
+                try:
+                    return float(price), float(size)
+                except (TypeError, ValueError):
+                    return None, None
+
+            # Bids are sorted descending; asks ascending. Take the first entry.
+            best_bid_price, best_bid_size = _lvl(bids[0])
+            best_ask_price, best_ask_size = _lvl(asks[0])
+            # Some SDKs return bids ascending; guard by picking max/min explicitly.
+            bid_prices = [_lvl(b)[0] for b in bids if _lvl(b)[0] is not None]
+            ask_prices = [_lvl(a)[0] for a in asks if _lvl(a)[0] is not None]
+            if not bid_prices or not ask_prices:
+                return None
+            best_bid_price = max(bid_prices)
+            best_ask_price = min(ask_prices)
+            if best_bid_price is None or best_ask_price is None:
+                return None
+            return {
+                "best_bid": best_bid_price,
+                "best_ask": best_ask_price,
+                "bid_size": best_bid_size or 0.0,
+                "ask_size": best_ask_size or 0.0,
+            }
+        except Exception:
+            logger.debug("Failed to parse order book for %s", token_id[:12], exc_info=True)
+            return None
+
     # ------------------------------------------------------------------
     # Order placement (live only)
     # ------------------------------------------------------------------
