@@ -54,6 +54,21 @@
         "MAX_PRICE": "0.95",
         "MAX_POSITION_SIZE": "50"
       }
+    },
+    {
+      "id": "composite_default",
+      "strategy": "composite",
+      "params": {
+        "MOMENTUM_WINDOW": "3",
+        "MOMENTUM_THRESHOLD": "0.02",
+        "MEAN_REVERSION_WINDOW": "5",
+        "MEAN_REVERSION_ENTRY_Z": "1.5",
+        "STOP_LOSS_PCT": "0.10",
+        "TAKE_PROFIT_PCT": "0.15",
+        "MIN_PRICE": "0.05",
+        "MAX_PRICE": "0.95",
+        "MAX_POSITION_SIZE": "50"
+      }
     }
   ]
 }

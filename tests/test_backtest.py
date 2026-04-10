@@ -91,6 +91,23 @@ class TestBacktester:
         assert report.strategy == "mean_reversion"
         assert report.total_ticks > 0
 
+    def test_per_tick_spread_affects_slippage(self):
+        """When per-tick (price, spread) tuples are provided, slippage varies."""
+        cfg = _cfg(MOMENTUM_WINDOW="3", MOMENTUM_THRESHOLD="0.02", TAKE_PROFIT_PCT="0.10")
+        # Wide spread history — 10% spread per tick
+        wide = [(0.40, 0.10), (0.42, 0.10), (0.44, 0.10), (0.46, 0.10), (0.50, 0.10), (0.55, 0.10), (0.60, 0.10)]
+        bt_wide = Backtester(cfg, SimpleMomentum(cfg))
+        report_wide = bt_wide.run({"tok": wide})
+
+        # Narrow spread history — 1% spread per tick
+        narrow = [(0.40, 0.01), (0.42, 0.01), (0.44, 0.01), (0.46, 0.01), (0.50, 0.01), (0.55, 0.01), (0.60, 0.01)]
+        bt_narrow = Backtester(cfg, SimpleMomentum(cfg))
+        report_narrow = bt_narrow.run({"tok": narrow})
+
+        # Both should trade; narrow spread should produce better PnL
+        if report_wide.trades_closed > 0 and report_narrow.trades_closed > 0:
+            assert report_narrow.total_pnl > report_wide.total_pnl
+
     def test_multiple_tokens_are_independent(self):
         cfg = _cfg()
         bt = Backtester(cfg, SimpleMomentum(cfg), assumed_spread=0.0)

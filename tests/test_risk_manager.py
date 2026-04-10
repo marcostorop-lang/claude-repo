@@ -60,6 +60,31 @@ class TestRiskManager:
         assert verdict.allowed
         assert verdict.adjusted_size == pytest.approx(50.0)  # available=25, size=25/0.50=50
 
+    def test_compute_position_size_basic(self):
+        cfg = _cfg(MAX_POSITION_SIZE="100")
+        rm = RiskManager(cfg, PortfolioTracker())
+        size = rm.compute_position_size(price=0.50, confidence=0.8)
+        assert size == pytest.approx(200.0)  # 100 / 0.50
+
+    def test_compute_position_size_confidence_scaling(self):
+        cfg = _cfg(MAX_POSITION_SIZE="100", SIZING_CONFIDENCE_SCALE="true")
+        rm = RiskManager(cfg, PortfolioTracker())
+        size = rm.compute_position_size(price=0.50, confidence=0.6)
+        # 100 * 0.6 = 60 USD -> 60 / 0.50 = 120 shares
+        assert size == pytest.approx(120.0)
+
+    def test_compute_position_size_liquidity_cap(self):
+        cfg = _cfg(MAX_POSITION_SIZE="100", MAX_LIQUIDITY_FRACTION="0.01")
+        rm = RiskManager(cfg, PortfolioTracker())
+        # Liquidity = 1000, max fraction = 1%, so max USD = 10
+        size = rm.compute_position_size(price=0.50, confidence=0.8, liquidity=1000)
+        assert size == pytest.approx(20.0)  # 10 / 0.50
+
+    def test_compute_position_size_zero_price(self):
+        cfg = _cfg()
+        rm = RiskManager(cfg, PortfolioTracker())
+        assert rm.compute_position_size(price=0.0, confidence=0.8) == 0.0
+
     def test_stop_loss(self):
         cfg = _cfg(STOP_LOSS_PCT="0.10")
         rm = RiskManager(cfg, PortfolioTracker())

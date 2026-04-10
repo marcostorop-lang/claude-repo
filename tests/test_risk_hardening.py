@@ -157,3 +157,42 @@ class TestSpreadCheck:
         rm = RiskManager(cfg, PortfolioTracker())
         verdict = rm.check("tok1", Signal(Action.BUY, 0.8), 10, 0.50, spread=0.10)
         assert verdict.allowed
+
+
+class TestCategoryCorrelation:
+    def test_rejects_when_category_exposure_exceeded(self):
+        cfg = _cfg(MAX_EXPOSURE_PER_CATEGORY="50")
+        portfolio = PortfolioTracker()
+        # Open a position in "politics" category with exposure = 100 * 0.5 = $50
+        portfolio.open_position(Position("t1", "c1", "BUY", 100, 0.50, "test", "o1", category="politics"))
+        rm = RiskManager(cfg, portfolio)
+        verdict = rm.check("t2", Signal(Action.BUY, 0.8), 10, 0.50, category="politics")
+        assert not verdict.allowed
+        assert "Category" in verdict.reason
+
+    def test_allows_different_category(self):
+        cfg = _cfg(MAX_EXPOSURE_PER_CATEGORY="50")
+        portfolio = PortfolioTracker()
+        portfolio.open_position(Position("t1", "c1", "BUY", 100, 0.50, "test", "o1", category="politics"))
+        rm = RiskManager(cfg, portfolio)
+        verdict = rm.check("t2", Signal(Action.BUY, 0.8), 10, 0.50, category="sports")
+        assert verdict.allowed
+
+    def test_rejects_when_max_positions_per_category_reached(self):
+        cfg = _cfg(MAX_POSITIONS_PER_CATEGORY="2")
+        portfolio = PortfolioTracker()
+        portfolio.open_position(Position("t1", "c1", "BUY", 10, 0.50, "test", "o1", category="crypto"))
+        portfolio.open_position(Position("t2", "c2", "BUY", 10, 0.50, "test", "o2", category="crypto"))
+        rm = RiskManager(cfg, portfolio)
+        verdict = rm.check("t3", Signal(Action.BUY, 0.8), 10, 0.50, category="crypto")
+        assert not verdict.allowed
+        assert "crypto" in verdict.reason
+
+    def test_no_category_skips_check(self):
+        cfg = _cfg(MAX_EXPOSURE_PER_CATEGORY="10")
+        portfolio = PortfolioTracker()
+        portfolio.open_position(Position("t1", "c1", "BUY", 100, 0.50, "test", "o1"))
+        rm = RiskManager(cfg, portfolio)
+        # Empty category — check is skipped
+        verdict = rm.check("t2", Signal(Action.BUY, 0.8), 10, 0.50, category="")
+        assert verdict.allowed

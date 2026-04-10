@@ -67,6 +67,9 @@ class Config:
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5))
     max_daily_loss: float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS", 50.0))
     max_exposure_per_event: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_EVENT", 100.0))
+    # Cross-event concentration: max total exposure in one category (e.g. "politics")
+    max_exposure_per_category: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_CATEGORY", 150.0))
+    max_positions_per_category: int = field(default_factory=lambda: _env_int("MAX_POSITIONS_PER_CATEGORY", 3))
 
     # -- Price filters ---------------------------------------------------------
     min_price: float = field(default_factory=lambda: _env_float("MIN_PRICE", 0.05))
@@ -82,6 +85,16 @@ class Config:
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))
+
+    # -- Dynamic sizing --------------------------------------------------------
+    # Minimum confidence required to open a position (below this → skip)
+    min_confidence_for_trade: float = field(default_factory=lambda: _env_float("MIN_CONFIDENCE_FOR_TRADE", 0.0))
+    # When True, position size scales linearly with signal confidence:
+    #   size = base_size * confidence
+    # This means a 0.80 confidence signal takes 80% of max_position_size.
+    sizing_confidence_scale: bool = field(default_factory=lambda: _env_bool("SIZING_CONFIDENCE_SCALE", False))
+    # Maximum fraction of reported liquidity to consume in a single trade
+    max_liquidity_fraction: float = field(default_factory=lambda: _env_float("MAX_LIQUIDITY_FRACTION", 0.02))
 
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))

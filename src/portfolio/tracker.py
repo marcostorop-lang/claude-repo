@@ -23,6 +23,7 @@ class Position:
     strategy: str
     order_id: str
     entry_timestamp: str = ""
+    category: str = ""
 
     def unrealised_pnl(self, current_price: float) -> float:
         if self.side == "BUY":
@@ -83,6 +84,27 @@ class PortfolioTracker:
             for p in self.positions.values()
             if p.condition_id == cid
         )
+
+    def exposure_by_category(self, category: str) -> float:
+        """Total exposure for all positions in the same category.
+
+        This catches cross-event correlation — e.g. multiple political markets
+        are in the same category even if their condition_ids differ.
+        Returns 0.0 if category is empty (no correlation tracking possible).
+        """
+        if not category:
+            return 0.0
+        return sum(
+            p.notional_exposure
+            for p in self.positions.values()
+            if p.category == category
+        )
+
+    def position_count_by_category(self, category: str) -> int:
+        """Number of open positions in the same category."""
+        if not category:
+            return 0
+        return sum(1 for p in self.positions.values() if p.category == category)
 
     def total_unrealised_pnl(self, price_fn) -> float:
         """Calculate total unrealised P&L using a callable that returns the current price for a token_id."""

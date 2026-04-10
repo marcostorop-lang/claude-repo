@@ -73,6 +73,43 @@ class RiskManager:
         return self._daily_realized_pnl
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Dynamic position sizing
+    # ------------------------------------------------------------------
+
+    def compute_position_size(
+        self,
+        price: float,
+        confidence: float,
+        liquidity: float = 0.0,
+    ) -> float:
+        """Compute the proposed position size in shares.
+
+        Base size = max_position_size / price, then optionally scaled by:
+        - Signal confidence (linear: size *= confidence)
+        - Available liquidity (cap at max_liquidity_fraction of reported liquidity)
+        """
+        if price <= 0:
+            return 0.0
+        base_usd = self.cfg.max_position_size
+
+        # Confidence scaling: high-confidence signals get larger positions
+        if self.cfg.sizing_confidence_scale and confidence > 0:
+            base_usd *= min(confidence, 1.0)
+
+        # Liquidity cap: never take more than X% of reported market liquidity
+        if liquidity > 0 and self.cfg.max_liquidity_fraction > 0:
+            max_usd_from_liq = liquidity * self.cfg.max_liquidity_fraction
+            if base_usd > max_usd_from_liq:
+                logger.debug(
+                    "Sizing capped by liquidity: $%.2f -> $%.2f (%.1f%% of $%.0f)",
+                    base_usd, max_usd_from_liq,
+                    self.cfg.max_liquidity_fraction * 100, liquidity,
+                )
+                base_usd = max_usd_from_liq
+
+        return base_usd / price
+
     # Pre-trade risk check
     # ------------------------------------------------------------------
 
@@ -83,6 +120,7 @@ class RiskManager:
         proposed_size: float,
         price: float,
         spread: float = 0.0,
+        category: str = "",
     ) -> RiskVerdict:
         """Evaluate whether a trade should proceed and at what size."""
 
@@ -119,6 +157,21 @@ class RiskManager:
             event_exposure = self.portfolio.exposure_by_condition(token_id)
             if event_exposure >= self.cfg.max_exposure_per_event:
                 return RiskVerdict(False, 0.0, f"Event exposure ${event_exposure:.2f} exceeds limit ${self.cfg.max_exposure_per_event:.2f}.")
+
+        # --- Cross-event category correlation limit ---
+        if signal.action == Action.BUY and category:
+            cat_exposure = self.portfolio.exposure_by_category(category)
+            if cat_exposure >= self.cfg.max_exposure_per_category:
+                return RiskVerdict(
+                    False, 0.0,
+                    f"Category '{category}' exposure ${cat_exposure:.2f} exceeds limit ${self.cfg.max_exposure_per_category:.2f}.",
+                )
+            cat_count = self.portfolio.position_count_by_category(category)
+            if cat_count >= self.cfg.max_positions_per_category:
+                return RiskVerdict(
+                    False, 0.0,
+                    f"Category '{category}' already has {cat_count} positions (max {self.cfg.max_positions_per_category}).",
+                )
 
         # --- Position size cap ---
         size = min(proposed_size, self.cfg.max_position_size)

@@ -19,3 +19,53 @@ def utc_timestamp() -> float:
 def iso_now() -> str:
     """Return current UTC time as ISO-8601 string."""
     return utc_now().isoformat()
+
+
+def parse_end_date(end_date: str) -> datetime | None:
+    """Parse an end-date string (ISO-8601) into a timezone-aware datetime."""
+    if not end_date:
+        return None
+    try:
+        dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def hours_until(end_date: str, now: datetime | None = None) -> float | None:
+    """Return hours until *end_date*, or None if unparseable."""
+    dt = parse_end_date(end_date)
+    if dt is None:
+        return None
+    now = now or utc_now()
+    delta = (dt - now).total_seconds() / 3600.0
+    return max(delta, 0.0)
+
+
+def time_decay_factor(end_date: str, now: datetime | None = None) -> float:
+    """Return a [0, 1] multiplier that captures how close a market is to resolution.
+
+    The curve is designed for prediction market trading:
+
+    - > 30 days out:  1.0 (no penalty — long-dated, signals are normal)
+    - 7-30 days:      1.0 (sweet spot for trading)
+    - 1-7 days:       linear ramp 1.0 → 0.7 (approaching resolution, reduce size)
+    - 6-24 hours:     0.5  (high urgency, halve confidence)
+    - < 6 hours:      0.2  (very close to resolution, almost no position)
+
+    Returns 1.0 if end_date is empty/unparseable (no penalty when we don't know).
+    """
+    h = hours_until(end_date, now)
+    if h is None:
+        return 1.0
+    if h > 7 * 24:
+        return 1.0
+    if h > 24:
+        # 7 days → 1 day: linear 1.0 → 0.7
+        days_left = h / 24.0
+        return 0.7 + 0.3 * (days_left - 1.0) / 6.0
+    if h > 6:
+        return 0.5
+    return 0.2

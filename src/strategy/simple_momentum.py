@@ -16,6 +16,7 @@ from src.config import Config
 from src.polymarket.market_data import MarketSnapshot
 from src.strategy.base import Action, BaseStrategy, Signal
 from src.utils.math_utils import pct_change
+from src.utils.time_utils import time_decay_factor
 
 
 class SimpleMomentum(BaseStrategy):
@@ -38,6 +39,7 @@ class SimpleMomentum(BaseStrategy):
 
         recent = list(price_history[-self.window :])
         change = pct_change(recent[0], recent[-1])
+        decay = time_decay_factor(snapshot.end_date)
         features = {
             "momentum": change,
             "window": self.window,
@@ -45,20 +47,23 @@ class SimpleMomentum(BaseStrategy):
             "history_len": len(price_history),
             "current_price": snapshot.price,
             "spread": snapshot.spread,
+            "time_decay": decay,
         }
 
         if change > self.threshold:
+            raw_conf = min(abs(change) / self.threshold, 1.0)
             return Signal(
                 Action.BUY,
-                min(abs(change) / self.threshold, 1.0),
-                f"Momentum +{change:.2%} over {self.window} ticks.",
+                raw_conf * decay,
+                f"Momentum +{change:.2%} over {self.window} ticks (decay={decay:.2f}).",
                 features=features,
             )
         if change < -self.threshold:
+            raw_conf = min(abs(change) / self.threshold, 1.0)
             return Signal(
                 Action.SELL,
-                min(abs(change) / self.threshold, 1.0),
-                f"Momentum {change:.2%} over {self.window} ticks.",
+                raw_conf * decay,
+                f"Momentum {change:.2%} over {self.window} ticks (decay={decay:.2f}).",
                 features=features,
             )
         return Signal(

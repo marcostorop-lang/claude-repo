@@ -125,6 +125,11 @@ class SQLiteStore:
         if existing_dl and "features" not in existing_dl:
             cur.execute("ALTER TABLE decision_log ADD COLUMN features TEXT DEFAULT '{}'")
             logger.info("Migrated decision_log: added column 'features'")
+        # price_history: add spread column if missing (older DBs)
+        existing_ph = {row[1] for row in cur.execute("PRAGMA table_info(price_history)").fetchall()}
+        if existing_ph and "spread" not in existing_ph:
+            cur.execute("ALTER TABLE price_history ADD COLUMN spread REAL DEFAULT 0.0")
+            logger.info("Migrated price_history: added column 'spread'")
         # tick_stats: add skip counters if missing (older DBs)
         existing_ts = {row[1] for row in cur.execute("PRAGMA table_info(tick_stats)").fetchall()}
         if existing_ts:
@@ -276,10 +281,10 @@ class SQLiteStore:
 
     # -- Price history ---------------------------------------------------------
 
-    def insert_price(self, token_id: str, price: float, timestamp: str) -> None:
+    def insert_price(self, token_id: str, price: float, timestamp: str, spread: float = 0.0) -> None:
         self._conn.execute(
-            "INSERT INTO price_history (token_id, price, timestamp) VALUES (?, ?, ?)",
-            (token_id, price, timestamp),
+            "INSERT INTO price_history (token_id, price, timestamp, spread) VALUES (?, ?, ?, ?)",
+            (token_id, price, timestamp, spread),
         )
         self._conn.commit()
 

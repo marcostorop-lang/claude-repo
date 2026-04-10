@@ -154,6 +154,35 @@ const marketsList = mkts.map(r => {
   return { question: r.question || r.condition_id, total_trades: r.total_trades, pnl: +mp.toFixed(2), win_rate: mc ? +(mw / mc * 100).toFixed(1) : 0, strategies: r.strategies || "-" };
 });
 
+// === CALIBRATION ===
+let calibrationBuckets = [];
+if (tableExists("calibration")) {
+  const calRows = query("SELECT confidence, return_pct, pnl FROM calibration WHERE exit_timestamp IS NOT NULL AND exit_timestamp != ''");
+  if (calRows.length > 0) {
+    const nBins = 5;
+    const bins = Array.from({ length: nBins }, () => []);
+    for (const r of calRows) {
+      const conf = r.confidence || 0;
+      const idx = Math.min(Math.floor(conf * nBins), nBins - 1);
+      bins[idx].push(r);
+    }
+    for (let i = 0; i < nBins; i++) {
+      const lo = (i / nBins).toFixed(2);
+      const hi = ((i + 1) / nBins).toFixed(2);
+      const b = bins[i];
+      const n = b.length;
+      const wins = b.filter(r => (r.return_pct || 0) > 0).length;
+      const avgRet = n > 0 ? b.reduce((s, r) => s + (r.return_pct || 0), 0) / n : 0;
+      const avgConf = n > 0 ? b.reduce((s, r) => s + (r.confidence || 0), 0) / n : 0;
+      const totPnl = b.reduce((s, r) => s + (r.pnl || 0), 0);
+      calibrationBuckets.push({
+        bucket: `[${lo}, ${hi})`, n, wins, winRate: n > 0 ? wins / n : 0,
+        avgRet, avgConf, totPnl,
+      });
+    }
+  }
+}
+
 // === BUILD HTML ===
 const pnlColor = o.total_pnl >= 0 ? "#22c55e" : "#ef4444";
 const pnlSign = o.total_pnl >= 0 ? "+" : "";
@@ -300,6 +329,7 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     <a href="#markets">Markets</a>
     <a href="#strategies">Strategies</a>
     <a href="#risk">Risk</a>
+    <a href="#calibration">Calibration</a>
     <a href="#config">Config</a>
   </nav>
   <div class="ver">Polymarket Bot v1.0</div>
@@ -430,6 +460,56 @@ ${botState && botState.positions && botState.positions.length > 0 ? `
 </div>
 <div class="divider"></div>
 ` : ''}
+
+${calibrationBuckets.length > 0 ? `
+<div class="section" id="calibration">
+  <h2>Confidence Calibration</h2>
+  <p style="font-size:13px;color:#9ca3af;margin-bottom:16px">
+    A well-calibrated strategy shows higher win-rates in higher confidence buckets.
+    Flat or inverted curves indicate the confidence signal is not predictive.
+  </p>
+  <div class="grid2">
+    <div class="card overflow-x" style="padding:0">
+      <table>
+        <thead><tr><th>Bucket</th><th class="text-right">N</th><th class="text-right">Wins</th><th class="text-right">Win Rate</th><th class="text-right">Avg Return</th><th class="text-right">PnL</th></tr></thead>
+        <tbody>${calibrationBuckets.map(b => {
+          const wrColor = b.winRate >= 0.5 ? '#22c55e' : b.n === 0 ? '#6b7280' : '#ef4444';
+          const pnlColor2 = b.totPnl >= 0 ? '#22c55e' : '#ef4444';
+          return `<tr>
+            <td class="mono">${b.bucket}</td>
+            <td class="text-right mono">${b.n}</td>
+            <td class="text-right mono">${b.wins}</td>
+            <td class="text-right mono" style="color:${wrColor}">${(b.winRate * 100).toFixed(1)}%</td>
+            <td class="text-right mono" style="color:${b.avgRet >= 0 ? '#22c55e' : '#ef4444'}">${(b.avgRet * 100).toFixed(2)}%</td>
+            <td class="text-right mono" style="color:${pnlColor2}">$${b.totPnl.toFixed(2)}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>Win Rate by Confidence</h3>
+      <div style="display:flex;align-items:flex-end;gap:8px;height:120px;margin-top:12px">
+        ${calibrationBuckets.map(b => {
+          const h = b.n === 0 ? 4 : Math.max(4, b.winRate * 100);
+          const color = b.n === 0 ? '#2a3040' : b.winRate >= 0.5 ? '#22c55e' : '#ef4444';
+          return `<div style="flex:1;display:flex;flex-direction:column;align-items:center">
+            <div style="width:100%;height:${h}px;background:${color};border-radius:3px 3px 0 0" title="${b.bucket}: ${(b.winRate * 100).toFixed(1)}% (n=${b.n})"></div>
+            <div style="font-size:9px;color:#6b7280;margin-top:4px">${b.bucket.slice(1, 5)}</div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div style="text-align:center;font-size:10px;color:#6b7280;margin-top:8px">Confidence Range</div>
+    </div>
+  </div>
+</div>
+<div class="divider"></div>
+` : `
+<div class="section" id="calibration">
+  <h2>Confidence Calibration</h2>
+  <div class="card"><p style="color:#6b7280;font-size:13px">No calibration data yet. The bot records confidence vs outcome on each closed trade. Run the bot to accumulate data.</p></div>
+</div>
+<div class="divider"></div>
+`}
 
 <div class="section" id="config">
   <h2>Configuration${botState ? ' (live from bot)' : ' (defaults)'}</h2>

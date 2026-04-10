@@ -17,6 +17,7 @@ from src.config import Config
 from src.polymarket.market_data import MarketSnapshot
 from src.strategy.base import Action, BaseStrategy, Signal
 from src.utils.math_utils import z_score
+from src.utils.time_utils import time_decay_factor
 
 
 class MeanReversion(BaseStrategy):
@@ -43,6 +44,7 @@ class MeanReversion(BaseStrategy):
 
         window = list(price_history[-self.window :])
         z = z_score(snapshot.price, window)
+        decay = time_decay_factor(snapshot.end_date)
         from src.utils.math_utils import mean, stdev
         features = {
             "z_score": z,
@@ -53,20 +55,23 @@ class MeanReversion(BaseStrategy):
             "current_price": snapshot.price,
             "spread": snapshot.spread,
             "history_len": len(price_history),
+            "time_decay": decay,
         }
 
         if z < -self.entry_z:
+            raw_conf = min(abs(z) / self.entry_z, 1.0)
             return Signal(
                 Action.BUY,
-                min(abs(z) / self.entry_z, 1.0),
-                f"Mean-reversion BUY: z={z:.2f}",
+                raw_conf * decay,
+                f"Mean-reversion BUY: z={z:.2f} (decay={decay:.2f})",
                 features=features,
             )
         if z > self.entry_z:
+            raw_conf = min(abs(z) / self.entry_z, 1.0)
             return Signal(
                 Action.SELL,
-                min(abs(z) / self.entry_z, 1.0),
-                f"Mean-reversion SELL: z={z:.2f}",
+                raw_conf * decay,
+                f"Mean-reversion SELL: z={z:.2f} (decay={decay:.2f})",
                 features=features,
             )
         if abs(z) < self.exit_z:

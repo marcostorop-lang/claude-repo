@@ -15,7 +15,9 @@ Assumptions / known limitations (documented inline so nobody treats the
 output as ground truth):
 
 - Only midpoint prices are replayed; historical bid/ask/depth is not stored.
-- Spread is approximated with a constant ``assumed_spread`` (default 0.02).
+- When per-tick spread data is available (recorded by the live bot), it is
+  used for realistic slippage simulation.  Otherwise ``assumed_spread``
+  (default 0.02) is used as a fallback.
 - Fills apply half-spread slippage like the live paper engine.
 - Stop-loss / take-profit checks run on the next tick (no intrabar logic).
 - No market-level volume / liquidity filters (we assume the historical tick
@@ -123,28 +125,41 @@ class Backtester:
         self.assumed_spread = assumed_spread
         self.position_size_usd = position_size_usd or cfg.max_position_size
 
-    def run(self, price_histories: dict[str, list[float]]) -> BacktestReport:
+    def run(self, price_histories: dict[str, list]) -> BacktestReport:
         """Replay every token's history independently.
 
         Parameters
         ----------
         price_histories:
             ``{token_id: [p0, p1, ..., pN]}`` with chronological prices.
+            Each element can be a plain ``float`` (price only — uses
+            ``assumed_spread``) or a ``(price, spread)`` tuple when
+            per-tick spread data is available.
         """
         all_trades: list[BacktestTrade] = []
         signals_generated = 0
         total_ticks = 0
-        half_spread = self.assumed_spread / 2.0
 
-        for token_id, history in price_histories.items():
-            if len(history) < 2:
+        for token_id, raw_history in price_histories.items():
+            if len(raw_history) < 2:
                 continue
+
+            # Normalise: each tick → (price, spread)
+            ticks: list[tuple[float, float]] = []
+            for item in raw_history:
+                if isinstance(item, (list, tuple)):
+                    ticks.append((float(item[0]), float(item[1])))
+                else:
+                    ticks.append((float(item), self.assumed_spread))
+
             open_trade: BacktestTrade | None = None
 
-            for i in range(1, len(history)):
+            for i in range(1, len(ticks)):
                 total_ticks += 1
-                current_price = history[i]
-                history_so_far = history[: i + 1]
+                current_price, tick_spread = ticks[i]
+                # Use per-tick spread when available, fall back to assumed
+                half_spread = (tick_spread if tick_spread > 0 else self.assumed_spread) / 2.0
+                price_history_so_far = [t[0] for t in ticks[: i + 1]]
 
                 # --- Check exits on open position ---
                 if open_trade is not None:
@@ -178,12 +193,12 @@ class Backtester:
                     token_id=token_id,
                     outcome="",
                     price=current_price,
-                    spread=self.assumed_spread,
+                    spread=tick_spread if tick_spread > 0 else self.assumed_spread,
                     volume=1e6,
                     liquidity=1e5,
                     active=True,
                 )
-                sig = self.strategy.evaluate(snap, history_so_far)
+                sig = self.strategy.evaluate(snap, price_history_so_far)
                 if sig.action != Action.BUY:
                     continue
 
@@ -191,7 +206,11 @@ class Backtester:
 
                 # --- Simulate fill (with slippage) ---
                 fill_price = current_price + half_spread
-                size = self.position_size_usd / fill_price if fill_price > 0 else 0.0
+                # Dynamic sizing: scale by confidence when enabled
+                base_usd = self.position_size_usd
+                if self.cfg.sizing_confidence_scale and sig.confidence > 0:
+                    base_usd *= min(sig.confidence, 1.0)
+                size = base_usd / fill_price if fill_price > 0 else 0.0
                 open_trade = BacktestTrade(
                     token_id=token_id,
                     entry_idx=i,
@@ -203,8 +222,10 @@ class Backtester:
 
             # Close any still-open trade with the last observed price (end-of-file)
             if open_trade is not None:
-                open_trade.exit_idx = len(history) - 1
-                open_trade.exit_price = max(history[-1] - half_spread, 0.0001)
+                last_price, last_spread = ticks[-1]
+                hs = (last_spread if last_spread > 0 else self.assumed_spread) / 2.0
+                open_trade.exit_idx = len(ticks) - 1
+                open_trade.exit_price = max(last_price - hs, 0.0001)
                 open_trade.exit_reason = "eof"
                 all_trades.append(open_trade)
 
@@ -265,18 +286,35 @@ class Backtester:
 def load_price_histories_from_store(
     store: SQLiteStore,
     min_points: int = 5,
-) -> dict[str, list[float]]:
+) -> dict[str, list]:
     """Load all price histories from the SQLite store, grouped by token.
 
     Only returns tokens with at least *min_points* observations since most
     strategies require a warmup window.
+
+    Returns ``{token_id: [(price, spread), ...]}`` when spread data is
+    available, or ``{token_id: [price, ...]}`` for older databases without
+    spread data.  The Backtester.run() method handles both formats.
     """
-    cur = store._conn.execute(
-        "SELECT token_id, price FROM price_history ORDER BY id ASC"
-    )
-    histories: dict[str, list[float]] = defaultdict(list)
-    for row in cur.fetchall():
-        histories[row["token_id"]].append(row["price"])
+    # Check whether the spread column exists
+    cols = {row[1] for row in store._conn.execute("PRAGMA table_info(price_history)").fetchall()}
+    has_spread = "spread" in cols
+
+    if has_spread:
+        cur = store._conn.execute(
+            "SELECT token_id, price, spread FROM price_history ORDER BY id ASC"
+        )
+        histories: dict[str, list] = defaultdict(list)
+        for row in cur.fetchall():
+            spread = row["spread"] or 0.0
+            histories[row["token_id"]].append((row["price"], spread))
+    else:
+        cur = store._conn.execute(
+            "SELECT token_id, price FROM price_history ORDER BY id ASC"
+        )
+        histories = defaultdict(list)
+        for row in cur.fetchall():
+            histories[row["token_id"]].append(row["price"])
     return {tok: h for tok, h in histories.items() if len(h) >= min_points}
 
 

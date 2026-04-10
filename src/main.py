@@ -30,6 +30,7 @@ from src.portfolio.tracker import PortfolioTracker, Position
 from src.risk.manager import RiskManager
 from src.storage.sqlite_store import SQLiteStore
 from src.strategy.base import Action, BaseStrategy
+from src.strategy.composite import CompositeStrategy
 from src.strategy.mean_reversion import MeanReversion
 from src.strategy.simple_momentum import SimpleMomentum
 from src.utils.time_utils import iso_now, utc_timestamp
@@ -49,6 +50,8 @@ def _handle_signal(signum, frame):
 def _build_strategy(cfg: Config) -> BaseStrategy:
     if cfg.strategy == "mean_reversion":
         return MeanReversion(cfg)
+    if cfg.strategy == "composite":
+        return CompositeStrategy(cfg)
     return SimpleMomentum(cfg)
 
 
@@ -310,9 +313,9 @@ def _tick(
             skip_already_open += 1
             continue  # already have a position
 
-        # Record price
+        # Record price (with spread for realistic backtest slippage)
         if snap.price is not None:
-            store.insert_price(snap.token_id, snap.price, tick_ts)
+            store.insert_price(snap.token_id, snap.price, tick_ts, spread=snap.spread or 0.0)
         else:
             skip_no_price += 1
             continue
@@ -331,9 +334,20 @@ def _tick(
 
         signals_generated += 1
 
-        # 4. Risk check
-        proposed_size = cfg.max_position_size / snap.price if snap.price else 0
-        verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0)
+        # 3b. Confidence gate — skip if below minimum
+        if sig.confidence < cfg.min_confidence_for_trade:
+            logger.debug("Skipping %s: confidence %.3f below min %.3f",
+                         snap.token_id[:12], sig.confidence, cfg.min_confidence_for_trade)
+            skip_hold += 1
+            continue
+
+        # 4. Risk check (dynamic sizing based on confidence + liquidity)
+        proposed_size = risk_mgr.compute_position_size(
+            price=snap.price or 0,
+            confidence=sig.confidence,
+            liquidity=snap.liquidity,
+        )
+        verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0, category=snap.category)
         if not verdict.allowed:
             risk_rejections += 1
             logger.debug("Risk denied for %s: %s", snap.token_id[:12], verdict.reason)
@@ -400,6 +414,7 @@ def _tick(
                     strategy=strategy.name,
                     order_id=result.order_id,
                     entry_timestamp=tick_ts,
+                    category=snap.category,
                 )
             )
             store.insert_decision(

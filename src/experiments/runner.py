@@ -43,6 +43,7 @@ from src.backtest.engine import Backtester, load_price_histories_from_store
 from src.config import Config
 from src.storage.sqlite_store import SQLiteStore
 from src.strategy.base import BaseStrategy
+from src.strategy.composite import CompositeStrategy
 from src.strategy.mean_reversion import MeanReversion
 from src.strategy.simple_momentum import SimpleMomentum
 
@@ -52,6 +53,8 @@ logger = logging.getLogger(__name__)
 def _build_strategy(cfg: Config, name: str) -> BaseStrategy:
     if name == "mean_reversion":
         return MeanReversion(cfg)
+    if name == "composite":
+        return CompositeStrategy(cfg)
     return SimpleMomentum(cfg)
 
 
