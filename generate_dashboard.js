@@ -156,6 +156,7 @@ const marketsList = mkts.map(r => {
 
 // === RESOLUTION TRACKING ===
 let resolutionStats = { total: 0, correct: 0, accuracy: 0, pnl: 0 };
+let resolutionRecent = [];
 if (tableExists("market_resolutions")) {
   const rs = queryOne("SELECT COUNT(*) as total, SUM(prediction_correct) as correct, SUM(our_pnl) as pnl FROM market_resolutions");
   if (rs && rs.total > 0) {
@@ -165,6 +166,77 @@ if (tableExists("market_resolutions")) {
       accuracy: rs.correct ? (rs.correct / rs.total * 100).toFixed(1) : "0",
       pnl: rs.pnl || 0,
     };
+  }
+  // Recent resolved markets (most recent 10)
+  resolutionRecent = query(
+    "SELECT question, outcome, our_side, our_entry_price, our_exit_price, our_pnl, prediction_correct, checked_at " +
+    "FROM market_resolutions ORDER BY checked_at DESC LIMIT 10"
+  );
+}
+
+// === EDGE CALIBRATION ===
+// Join resolutions with entry decisions to compute accuracy by confidence bucket.
+let edgeCalibration = null;
+if (tableExists("market_resolutions") && tableExists("decision_log") && resolutionStats.total > 0) {
+  try {
+    const rows = query(
+      "SELECT mr.prediction_correct as correct, mr.our_pnl as pnl, dl.confidence as confidence, dl.features as features " +
+      "FROM market_resolutions mr " +
+      "JOIN decision_log dl ON dl.token_id = mr.token_id " +
+      "WHERE dl.action IN ('ENTRY_BUY','ENTRY_SELL') " +
+      "GROUP BY mr.token_id"
+    );
+    if (rows.length > 0) {
+      const nBins = 5;
+      const bins = Array.from({ length: nBins }, () => ({ count: 0, correct: 0, pnl: 0 }));
+      for (const r of rows) {
+        const c = r.confidence || 0;
+        const idx = Math.min(Math.floor(c * nBins), nBins - 1);
+        bins[idx].count += 1;
+        if (r.correct) bins[idx].correct += 1;
+        bins[idx].pnl += (r.pnl || 0);
+      }
+      edgeCalibration = bins.map((b, i) => ({
+        range: `${(i/nBins).toFixed(1)}-${((i+1)/nBins).toFixed(1)}`,
+        count: b.count,
+        correct: b.correct,
+        accuracy: b.count > 0 ? (b.correct / b.count * 100).toFixed(0) : "0",
+        avg_pnl: b.count > 0 ? (b.pnl / b.count).toFixed(2) : "0.00",
+      })).filter(b => b.count > 0);
+    }
+  } catch (e) {
+    // Non-fatal — dashboard still renders without calibration section
+  }
+}
+
+// === BOOK QUALITY METRICS (from recent ENTRY decisions) ===
+let bookQualityStats = null;
+if (tableExists("decision_log")) {
+  try {
+    const rows = query(
+      "SELECT features FROM decision_log WHERE action IN ('ENTRY_BUY','ENTRY_SELL') " +
+      "AND features IS NOT NULL AND features != '{}' ORDER BY id DESC LIMIT 50"
+    );
+    const slippages = [];
+    const imbalances = [];
+    for (const r of rows) {
+      try {
+        const f = JSON.parse(r.features);
+        if (typeof f.slippage_pct === "number") slippages.push(f.slippage_pct);
+        if (typeof f.book_imbalance_5pct === "number") imbalances.push(f.book_imbalance_5pct);
+      } catch (_) { /* skip bad JSON */ }
+    }
+    if (slippages.length > 0 || imbalances.length > 0) {
+      const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+      bookQualityStats = {
+        n: Math.max(slippages.length, imbalances.length),
+        avg_slippage_bps: (avg(slippages) * 10000).toFixed(1),
+        max_slippage_bps: slippages.length ? (Math.max(...slippages) * 10000).toFixed(1) : "0.0",
+        avg_imbalance: avg(imbalances).toFixed(3),
+      };
+    }
+  } catch (e) {
+    // Non-fatal
   }
 }
 
@@ -449,12 +521,64 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
   </div>
   ${resolutionStats.total > 0 ? `
   <div style="margin-top:12px">
-    <h3>Market Resolution Accuracy</h3>
+    <h3>Market Resolution Accuracy (ground truth)</h3>
     <div class="grid4" style="margin-top:8px">
       <div class="card"><div class="stat-val white">${resolutionStats.total}</div><div class="stat-label">Markets Resolved</div></div>
       <div class="card"><div class="stat-val" style="color:${resolutionStats.accuracy >= 50 ? '#22c55e' : '#ef4444'}">${resolutionStats.accuracy}%</div><div class="stat-label">Prediction Accuracy</div></div>
       <div class="card"><div class="stat-val green">${resolutionStats.correct}</div><div class="stat-label">Correct Predictions</div></div>
       <div class="card"><div class="stat-val" style="color:${resolutionStats.pnl >= 0 ? '#22c55e' : '#ef4444'}">$${resolutionStats.pnl.toFixed(2)}</div><div class="stat-label">Resolution PnL</div></div>
+    </div>
+  </div>
+  ` : ''}
+  ${edgeCalibration && edgeCalibration.length > 0 ? `
+  <div style="margin-top:16px">
+    <h3>Edge-model calibration (confidence → accuracy)</h3>
+    <div class="card overflow-x" style="padding:0;margin-top:8px">
+      <table>
+        <thead><tr><th>Confidence</th><th class="text-right">N</th><th class="text-right">Correct</th><th class="text-right">Accuracy</th><th class="text-right">Avg PnL</th></tr></thead>
+        <tbody>${edgeCalibration.map(b => `
+          <tr>
+            <td class="mono">${b.range}</td>
+            <td class="text-right mono">${b.count}</td>
+            <td class="text-right mono">${b.correct}</td>
+            <td class="text-right mono" style="color:${parseFloat(b.accuracy) >= 50 ? '#22c55e' : '#ef4444'}">${b.accuracy}%</td>
+            <td class="text-right mono" style="color:${parseFloat(b.avg_pnl) >= 0 ? '#22c55e' : '#ef4444'}">$${b.avg_pnl}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </div>
+    <div style="color:#9ca3af;font-size:12px;margin-top:6px">
+      Well-calibrated models show increasing accuracy with higher confidence buckets.
+    </div>
+  </div>
+  ` : ''}
+  ${bookQualityStats ? `
+  <div style="margin-top:16px">
+    <h3>Execution quality (last ${bookQualityStats.n} entries)</h3>
+    <div class="grid4" style="margin-top:8px">
+      <div class="card"><div class="stat-val white">${bookQualityStats.avg_slippage_bps}</div><div class="stat-label">Avg Slippage (bps)</div></div>
+      <div class="card"><div class="stat-val white">${bookQualityStats.max_slippage_bps}</div><div class="stat-label">Max Slippage (bps)</div></div>
+      <div class="card"><div class="stat-val white">${bookQualityStats.avg_imbalance}</div><div class="stat-label">Avg Book Imbalance</div></div>
+      <div class="card"><div class="stat-val white">${bookQualityStats.n}</div><div class="stat-label">Entries Analyzed</div></div>
+    </div>
+  </div>
+  ` : ''}
+  ${resolutionRecent.length > 0 ? `
+  <div style="margin-top:16px">
+    <h3>Recent resolved markets</h3>
+    <div class="card overflow-x" style="padding:0;margin-top:8px">
+      <table>
+        <thead><tr><th>Question</th><th>Outcome</th><th>Side</th><th class="text-right">Entry</th><th class="text-right">Exit</th><th class="text-right">PnL</th><th>Prediction</th></tr></thead>
+        <tbody>${resolutionRecent.map(r => `
+          <tr>
+            <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.question || '-'}</td>
+            <td><span class="badge ${r.outcome === 'YES' ? 'badge-buy' : 'badge-sell'}">${r.outcome || '-'}</span></td>
+            <td>${r.our_side || '-'}</td>
+            <td class="text-right mono">${r.our_entry_price ? r.our_entry_price.toFixed(3) : '-'}</td>
+            <td class="text-right mono">${r.our_exit_price ? r.our_exit_price.toFixed(3) : '-'}</td>
+            <td class="text-right mono" style="color:${r.our_pnl >= 0 ? '#22c55e' : '#ef4444'}">$${(r.our_pnl || 0).toFixed(2)}</td>
+            <td style="color:${r.prediction_correct ? '#22c55e' : '#ef4444'}">${r.prediction_correct ? '✓ correct' : '✗ wrong'}</td>
+          </tr>`).join('')}</tbody>
+      </table>
     </div>
   </div>
   ` : ''}

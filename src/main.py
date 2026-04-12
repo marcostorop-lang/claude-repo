@@ -364,21 +364,32 @@ def _tick(
             )
             continue
 
-        # 5. Fetch top-of-book for the winning signal so execution uses the
-        #    real ask (for BUY) / bid (for SELL) instead of the midpoint.
+        # 5. Fetch full book analysis for the winning signal so execution uses
+        #    the **realistic VWAP** (not just top-of-book), which accounts for
+        #    slippage when our size exceeds depth at the best level.
+        #
         #    Fall back to midpoint + half-spread if the book fetch fails.
         exec_price = snap.price or 0.0
         exec_spread = snap.spread or 0.0
         is_book_price = False
-        book = client.get_top_of_book(snap.token_id)
-        if book is not None:
-            real_spread = book["best_ask"] - book["best_bid"]
+        slippage_pct = 0.0
+        book_imbalance = 0.0
+
+        # Size in USD for book VWAP calculation
+        size_usd = max(verdict.adjusted_size * (snap.price or 0.0), 1.0)
+        ba = client.get_book_analysis(snap.token_id, fill_size_usd=size_usd)
+        if ba is not None and ba.best_bid > 0 and ba.best_ask > 0:
+            real_spread = ba.spread
             if sig.action == Action.BUY:
-                exec_price = book["best_ask"]
+                exec_price = ba.vwap_buy if ba.vwap_buy > 0 else ba.best_ask
+                slippage_pct = ba.slippage_buy_pct
             else:
-                exec_price = book["best_bid"]
+                exec_price = ba.vwap_sell if ba.vwap_sell > 0 else ba.best_bid
+                slippage_pct = ba.slippage_sell_pct
             exec_spread = real_spread
             is_book_price = True
+            book_imbalance = ba.imbalance_5pct
+
             # Second-chance spread gate using the real book
             if real_spread > cfg.max_spread:
                 risk_rejections += 1
@@ -388,7 +399,52 @@ def _tick(
                     strategy=strategy.name, confidence=sig.confidence,
                     price=exec_price, spread=real_spread,
                     signal_detail=sig.reason, risk_detail="book_spread",
-                    features=sig.features,
+                    features={**sig.features, "book_imbalance_5pct": round(book_imbalance, 4)},
+                )
+                continue
+
+            # Reject if slippage is excessive — book too thin for our size.
+            # 2% slippage means the fill price is 2% worse than best bid/ask.
+            max_slippage = 0.02
+            if slippage_pct > max_slippage:
+                risk_rejections += 1
+                store.insert_decision(
+                    timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                    action="RISK_REJECTED",
+                    reason=f"Book too thin: slippage {slippage_pct:.3%} > {max_slippage:.1%}",
+                    strategy=strategy.name, confidence=sig.confidence,
+                    price=exec_price, spread=real_spread,
+                    signal_detail=sig.reason, risk_detail="book_slippage",
+                    features={
+                        **sig.features,
+                        "slippage_pct": round(slippage_pct, 6),
+                        "size_usd": round(size_usd, 2),
+                        "book_imbalance_5pct": round(book_imbalance, 4),
+                    },
+                )
+                continue
+
+            # Reject if book imbalance strongly contradicts our direction.
+            # imbalance > 0 = buy pressure; imbalance < 0 = sell pressure.
+            # A strong -0.5 imbalance while we want to BUY is a red flag.
+            contra_threshold = 0.5
+            is_contra = (
+                (sig.action == Action.BUY and book_imbalance <= -contra_threshold) or
+                (sig.action == Action.SELL and book_imbalance >= contra_threshold)
+            )
+            if is_contra:
+                risk_rejections += 1
+                store.insert_decision(
+                    timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                    action="RISK_REJECTED",
+                    reason=f"Book imbalance {book_imbalance:+.3f} contradicts {sig.action.value}",
+                    strategy=strategy.name, confidence=sig.confidence,
+                    price=exec_price, spread=real_spread,
+                    signal_detail=sig.reason, risk_detail="book_imbalance_contra",
+                    features={
+                        **sig.features,
+                        "book_imbalance_5pct": round(book_imbalance, 4),
+                    },
                 )
                 continue
 
@@ -420,13 +476,20 @@ def _tick(
                     category=snap.category,
                 )
             )
+            entry_features = {
+                **sig.features,
+                "slippage_pct": round(slippage_pct, 6),
+                "book_imbalance_5pct": round(book_imbalance, 4),
+                "fill_price": round(exec_price, 4),
+                "midpoint_at_entry": round(snap.price or 0.0, 4),
+            }
             store.insert_decision(
                 timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
                 action="ENTRY_BUY", reason=sig.reason,
                 strategy=strategy.name, confidence=sig.confidence,
                 price=snap.price or 0, spread=snap.spread or 0,
                 signal_detail=sig.reason,
-                features=sig.features,
+                features=entry_features,
             )
             # Record a calibration entry so we can later measure predicted
             # confidence vs realised outcome.
@@ -436,7 +499,7 @@ def _tick(
                 strategy=strategy.name,
                 confidence=sig.confidence,
                 entry_price=snap.price or 0,
-                features=sig.features,
+                features=entry_features,
             )
 
     # Log tick summary with timing and per-reason counters
@@ -661,6 +724,18 @@ def cmd_check_resolutions():
     click.echo(result)
     store.close()
     client.close()
+
+
+@cli.command("edge-calibration")
+def cmd_edge_calibration():
+    """Analyze whether edge-model predictions were actually correct."""
+    from src.analysis.edge_calibration import analyze_edge_calibration, format_report_markdown
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    report = analyze_edge_calibration(store)
+    click.echo(format_report_markdown(report))
+    store.close()
 
 
 if __name__ == "__main__":
