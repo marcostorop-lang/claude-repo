@@ -43,21 +43,115 @@ class PortfolioTracker:
     realised_pnl: float = 0.0
 
     def open_position(self, pos: Position) -> None:
-        self.positions[pos.token_id] = pos
-        logger.info("Opened position: %s %s @ %.4f (size=%.4f)", pos.side, pos.token_id[:12], pos.entry_price, pos.size)
+        """Open a new position or add to an existing one.
 
-    def close_position(self, token_id: str, exit_price: float) -> float:
-        """Close a position and return the realised P&L."""
-        pos = self.positions.pop(token_id, None)
+        If a position already exists for the same token and side, the two are
+        merged with a size-weighted average entry price.  If the existing
+        position is on the opposite side, the incoming fill reduces/flips it
+        via :meth:`close_position` semantics — opposing BUY against a SELL
+        short realises P&L against the short's entry first.
+
+        This preserves accounting correctness when multiple fills accumulate
+        on the same token across ticks (e.g. scaling in, partial fills that
+        complete on a later tick, or a re-entry after a partial exit).
+        """
+        existing = self.positions.get(pos.token_id)
+        if existing is None:
+            self.positions[pos.token_id] = pos
+            logger.info(
+                "Opened position: %s %s @ %.4f (size=%.4f)",
+                pos.side, pos.token_id[:12], pos.entry_price, pos.size,
+            )
+            return
+
+        # Same-side → size-weighted average entry.
+        if existing.side == pos.side:
+            total_size = existing.size + pos.size
+            if total_size <= 0:
+                # Degenerate — replace with new.
+                self.positions[pos.token_id] = pos
+                return
+            new_entry = (
+                existing.entry_price * existing.size + pos.entry_price * pos.size
+            ) / total_size
+            existing.size = total_size
+            existing.entry_price = new_entry
+            # Preserve original strategy/order_id/entry_timestamp for audit; only
+            # the *aggregate* size+entry_price track live state.
+            logger.info(
+                "Added to position: %s %s +%.4f @ %.4f → size=%.4f, avg_entry=%.4f",
+                pos.side, pos.token_id[:12], pos.size, pos.entry_price,
+                existing.size, existing.entry_price,
+            )
+            return
+
+        # Opposite side → treat as (partial) close of the existing position.
+        # This handles the "SELL against a BUY" and vice versa case symmetrically.
+        close_qty = min(pos.size, existing.size)
+        self.close_position(pos.token_id, pos.entry_price, size=close_qty)
+        remainder = pos.size - close_qty
+        if remainder > 1e-9:
+            # More incoming than existing — the residual opens a new position
+            # on the *incoming* side (a flip).
+            new_pos = Position(
+                token_id=pos.token_id,
+                condition_id=pos.condition_id,
+                side=pos.side,
+                size=remainder,
+                entry_price=pos.entry_price,
+                strategy=pos.strategy,
+                order_id=pos.order_id,
+                entry_timestamp=pos.entry_timestamp,
+                category=pos.category,
+            )
+            self.positions[pos.token_id] = new_pos
+            logger.info(
+                "Flipped position: now %s %s size=%.4f @ %.4f",
+                new_pos.side, new_pos.token_id[:12], new_pos.size, new_pos.entry_price,
+            )
+
+    def close_position(
+        self,
+        token_id: str,
+        exit_price: float,
+        size: float | None = None,
+    ) -> float:
+        """Close a position (full or partial) and return the realised P&L.
+
+        If ``size`` is None or >= the current position size, the position is
+        fully closed and removed.  Otherwise a partial close is booked:
+        realised P&L for the closed slice is recorded and the remaining size
+        stays open at the original entry price (partial exits do not change
+        cost basis).
+        """
+        pos = self.positions.get(token_id)
         if pos is None:
             logger.warning("No open position for token %s", token_id[:12])
             return 0.0
-        pnl = pos.unrealised_pnl(exit_price)
+
+        close_qty = pos.size if size is None else min(size, pos.size)
+        if close_qty <= 0:
+            return 0.0
+
+        if pos.side == "BUY":
+            pnl = (exit_price - pos.entry_price) * close_qty
+        else:
+            pnl = (pos.entry_price - exit_price) * close_qty
         self.realised_pnl += pnl
-        logger.info(
-            "Closed position: %s %s @ %.4f → %.4f, PnL=%.4f",
-            pos.side, token_id[:12], pos.entry_price, exit_price, pnl,
-        )
+
+        remaining = pos.size - close_qty
+        if remaining <= 1e-9:
+            self.positions.pop(token_id, None)
+            logger.info(
+                "Closed position: %s %s @ %.4f → %.4f, size=%.4f, PnL=%.4f",
+                pos.side, token_id[:12], pos.entry_price, exit_price, close_qty, pnl,
+            )
+        else:
+            pos.size = remaining
+            logger.info(
+                "Partial close: %s %s -%.4f @ %.4f, remaining=%.4f, PnL=%.4f",
+                pos.side, token_id[:12], close_qty, exit_price, remaining, pnl,
+            )
         return pnl
 
     def open_position_count(self) -> int:
@@ -128,20 +222,45 @@ class PortfolioTracker:
         for t in trades:
             token_id = t["token_id"]
             side = t["side"]
+            size = float(t["size"])
+            price = float(t["price"])
+            if size <= 0:
+                continue
+
             if side == "BUY":
-                self.positions[token_id] = Position(
-                    token_id=token_id,
-                    condition_id=t["condition_id"],
-                    side="BUY",
-                    size=t["size"],
-                    entry_price=t["price"],
-                    strategy=t["strategy"],
-                    order_id=t["order_id"],
+                # Use the merging-aware open_position so repeated BUYs on the
+                # same token produce a weighted-average entry instead of
+                # overwriting the prior fill.
+                self.open_position(
+                    Position(
+                        token_id=token_id,
+                        condition_id=t["condition_id"],
+                        side="BUY",
+                        size=size,
+                        entry_price=price,
+                        strategy=t.get("strategy", ""),
+                        order_id=t.get("order_id", ""),
+                        entry_timestamp=t.get("timestamp", ""),
+                        category=t.get("category", ""),
+                    )
                 )
-            elif side == "SELL" and token_id in self.positions:
-                pos = self.positions.pop(token_id)
-                pnl = (t["price"] - pos.entry_price) * pos.size
-                self.realised_pnl += pnl
+            elif side == "SELL":
+                # Delegating to open_position handles all cases symmetrically:
+                # same-side merge (SELL+SELL), partial/full close against a
+                # BUY, and flip when the SELL exceeds the long.
+                self.open_position(
+                    Position(
+                        token_id=token_id,
+                        condition_id=t["condition_id"],
+                        side="SELL",
+                        size=size,
+                        entry_price=price,
+                        strategy=t.get("strategy", ""),
+                        order_id=t.get("order_id", ""),
+                        entry_timestamp=t.get("timestamp", ""),
+                        category=t.get("category", ""),
+                    )
+                )
 
         logger.info(
             "Portfolio reconstructed: %d open positions, realised_pnl=%.4f",
