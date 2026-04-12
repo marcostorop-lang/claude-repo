@@ -95,6 +95,22 @@ class Config:
     sizing_confidence_scale: bool = field(default_factory=lambda: _env_bool("SIZING_CONFIDENCE_SCALE", False))
     # Maximum fraction of reported liquidity to consume in a single trade
     max_liquidity_fraction: float = field(default_factory=lambda: _env_float("MAX_LIQUIDITY_FRACTION", 0.02))
+    # Edge-aware (fractional-Kelly) sizing: when True and a signed edge is
+    # supplied by the strategy, scale the position by |edge| * confidence *
+    # kelly_fraction.  This makes high-edge + high-confidence trades larger
+    # and marginal trades smaller — properly risk-adjusted.
+    sizing_edge_kelly: bool = field(default_factory=lambda: _env_bool("SIZING_EDGE_KELLY", False))
+    # Kelly fraction — 1.0 is full Kelly (aggressive), 0.25 is quarter-Kelly
+    # (conservative and typical for retail).  Applied on top of |edge| * confidence.
+    kelly_fraction: float = field(default_factory=lambda: _env_float("KELLY_FRACTION", 0.25))
+    # Minimum edge magnitude to trade (below this → HOLD regardless of confidence)
+    min_edge_for_trade: float = field(default_factory=lambda: _env_float("MIN_EDGE_FOR_TRADE", 0.0))
+    # Exit early when the edge model re-evaluates and flips direction against
+    # our open position.  Only applies to positions opened by strategies that
+    # expose an edge estimate (e.g. edge_based).  Requires |edge| > this value
+    # in the opposite direction to trigger exit.
+    exit_on_edge_flip: bool = field(default_factory=lambda: _env_bool("EXIT_ON_EDGE_FLIP", False))
+    exit_edge_flip_threshold: float = field(default_factory=lambda: _env_float("EXIT_EDGE_FLIP_THRESHOLD", 0.04))
 
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))

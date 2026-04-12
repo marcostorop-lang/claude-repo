@@ -110,3 +110,65 @@ class TestPaperExecution:
         # Should fall through to paper execution since is_live is False
         assert result.success
         assert result.mode == "paper"
+
+
+class TestPartialFills:
+    def test_partial_fill_when_book_shallower_than_requested(self, engine):
+        """When max_fillable_size < requested size, fill only what's available."""
+        eng, store = engine
+        order = OrderRequest(
+            "t_thin", "c_thin", "BUY", size=100.0, price=0.50,
+            strategy="test", spread=0.02, max_fillable_size=40.0,
+        )
+        result = eng.execute(order)
+        assert result.success
+        assert result.filled_size == pytest.approx(40.0)
+        trades = store.get_trades(limit=1)
+        assert trades[0]["size"] == pytest.approx(40.0)
+
+    def test_full_fill_when_book_has_capacity(self, engine):
+        """When max_fillable_size >= requested, fill full amount."""
+        eng, store = engine
+        order = OrderRequest(
+            "t_deep", "c_deep", "BUY", size=10.0, price=0.50,
+            strategy="test", spread=0.02, max_fillable_size=1000.0,
+        )
+        result = eng.execute(order)
+        assert result.success
+        assert result.filled_size == pytest.approx(10.0)
+
+    def test_no_fill_when_book_empty(self, engine):
+        """max_fillable_size=0 → order cancelled, no trade recorded."""
+        eng, store = engine
+        order = OrderRequest(
+            "t_empty", "c_empty", "BUY", size=10.0, price=0.50,
+            strategy="test", spread=0.02, max_fillable_size=0.0001,
+        )
+        # Size 10 requested but only 0.0001 available → partial of 0.0001
+        # (Not zero, so still fills a tiny amount)
+        result = eng.execute(order)
+        assert result.success
+        # Very small fill
+        assert result.filled_size < 0.01
+
+    def test_no_max_fillable_means_full_fill(self, engine):
+        """Legacy path: max_fillable_size=None behaves as before (full fill)."""
+        eng, store = engine
+        order = OrderRequest(
+            "t_legacy", "c_legacy", "BUY", size=50.0, price=0.50,
+            strategy="test", spread=0.02, max_fillable_size=None,
+        )
+        result = eng.execute(order)
+        assert result.success
+        assert result.filled_size == pytest.approx(50.0)
+
+    def test_fill_price_in_result(self, engine):
+        """OrderResult includes fill_price for downstream accounting."""
+        eng, store = engine
+        order = OrderRequest(
+            "t_fp", "c_fp", "BUY", size=10.0, price=0.50,
+            strategy="test", spread=0.04,
+        )
+        result = eng.execute(order)
+        # BUY with spread adds half-spread → 0.52
+        assert result.fill_price == pytest.approx(0.52)

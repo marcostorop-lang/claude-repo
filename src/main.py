@@ -145,6 +145,25 @@ def _check_exits_only(
             exit_reason = "stop_loss"
         elif risk_mgr.check_take_profit(pos.entry_price, current_price):
             exit_reason = "take_profit"
+        elif cfg.exit_on_edge_flip and pos.strategy == "edge_based":
+            try:
+                from src.analysis.edge import estimate_edge
+                history = store.get_price_history(token_id, limit=30)
+                if len(history) >= 4:
+                    spread = client.get_spread(token_id) or 0.0
+                    est = estimate_edge(
+                        price=current_price, price_history=history, spread=spread,
+                    )
+                    threshold = cfg.exit_edge_flip_threshold
+                    flipped = (
+                        (pos.side == "BUY" and est.edge < -threshold) or
+                        (pos.side == "SELL" and est.edge > threshold)
+                    )
+                    if flipped and est.edge_confidence > 0.3:
+                        exit_reason = "edge_flip"
+            except Exception:
+                logger.debug("Edge-flip check failed (circuit-breaker mode) for %s",
+                             token_id[:12], exc_info=True)
         if not exit_reason:
             continue
 
@@ -247,7 +266,7 @@ def _tick(
     tick_start = utc_timestamp()
     tick_ts = iso_now()
 
-    # 1. Check stop-loss / take-profit on existing positions
+    # 1. Check stop-loss / take-profit / edge-flip on existing positions
     tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
@@ -260,6 +279,36 @@ def _tick(
         elif risk_mgr.check_take_profit(pos.entry_price, current_price):
             logger.info("Take-profit triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
             tokens_to_close.append((token_id, "take_profit"))
+        elif cfg.exit_on_edge_flip and pos.strategy == "edge_based":
+            # Re-estimate edge on the live position.  If it's flipped against
+            # us with meaningful magnitude, exit before we hit stop-loss —
+            # limits losses when the original thesis is invalidated.
+            try:
+                from src.analysis.edge import estimate_edge
+                history = store.get_price_history(token_id, limit=30)
+                if len(history) >= 4:
+                    spread = client.get_spread(token_id) or 0.0
+                    est = estimate_edge(
+                        price=current_price,
+                        price_history=history,
+                        spread=spread,
+                    )
+                    threshold = cfg.exit_edge_flip_threshold
+                    # BUY position + edge now strongly negative → exit
+                    flipped = (
+                        (pos.side == "BUY" and est.edge < -threshold) or
+                        (pos.side == "SELL" and est.edge > threshold)
+                    )
+                    if flipped and est.edge_confidence > 0.3:
+                        logger.info(
+                            "Edge-flip exit for %s (entry=%.4f, current=%.4f, "
+                            "new edge=%+.4f, conf=%.2f)",
+                            token_id[:12], pos.entry_price, current_price,
+                            est.edge, est.edge_confidence,
+                        )
+                        tokens_to_close.append((token_id, "edge_flip"))
+            except Exception:
+                logger.debug("Edge-flip check failed for %s", token_id[:12], exc_info=True)
 
     for token_id, exit_reason in tokens_to_close:
         pos = portfolio.positions.get(token_id)
@@ -344,11 +393,21 @@ def _tick(
             skip_hold += 1
             continue
 
-        # 4. Risk check (dynamic sizing based on confidence + liquidity)
+        # 4. Risk check (dynamic sizing based on confidence + liquidity + edge)
+        # Extract signed edge from signal features if the strategy publishes it
+        # (edge-based strategy does; momentum/mean-rev do not).
+        sig_edge = None
+        try:
+            raw_edge = sig.features.get("edge") if sig.features else None
+            if raw_edge is not None:
+                sig_edge = float(raw_edge)
+        except (TypeError, ValueError):
+            sig_edge = None
         proposed_size = risk_mgr.compute_position_size(
             price=snap.price or 0,
             confidence=sig.confidence,
             liquidity=snap.liquidity,
+            edge=sig_edge,
         )
         verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0, category=snap.category)
         if not verdict.allowed:
@@ -448,7 +507,22 @@ def _tick(
                 )
                 continue
 
-        # 6. Execute
+        # 6. Compute max_fillable_size from book depth (partial fill handling).
+        #    We already walked the book to get VWAP; the fill-side depth tells
+        #    us how many shares the book can actually absorb at the target
+        #    slippage.  If the book has less than we want, the paper engine
+        #    will do a partial fill — reflecting reality.
+        max_fillable_size: float | None = None
+        if ba is not None:
+            # Use depth within 5% of midpoint on the relevant side as the
+            # fillable cap.  depth is in USD → convert to shares at the
+            # best price on that side.
+            if sig.action == Action.BUY and ba.best_ask > 0:
+                max_fillable_size = ba.ask_depth_5pct / ba.best_ask
+            elif sig.action == Action.SELL and ba.best_bid > 0:
+                max_fillable_size = ba.bid_depth_5pct / ba.best_bid
+
+        # 7. Execute
         order = OrderRequest(
             token_id=snap.token_id,
             condition_id=snap.condition_id,
@@ -458,30 +532,39 @@ def _tick(
             strategy=strategy.name,
             spread=exec_spread,
             is_book_price=is_book_price,
+            max_fillable_size=max_fillable_size,
         )
         result = executor.execute(order)
 
         if result.success and sig.action == Action.BUY:
             trades_executed += 1
+            # Use actual filled size (may be partial if book depth < requested)
+            actual_size = result.filled_size if result.filled_size > 0 else verdict.adjusted_size
+            actual_fill = result.fill_price if result.fill_price > 0 else exec_price
             portfolio.open_position(
                 Position(
                     token_id=snap.token_id,
                     condition_id=snap.condition_id,
                     side="BUY",
-                    size=verdict.adjusted_size,
-                    entry_price=snap.price or 0,
+                    size=actual_size,
+                    entry_price=actual_fill,
                     strategy=strategy.name,
                     order_id=result.order_id,
                     entry_timestamp=tick_ts,
                     category=snap.category,
                 )
             )
+            was_partial = actual_size < verdict.adjusted_size - 1e-9
             entry_features = {
                 **sig.features,
                 "slippage_pct": round(slippage_pct, 6),
                 "book_imbalance_5pct": round(book_imbalance, 4),
-                "fill_price": round(exec_price, 4),
+                "fill_price": round(actual_fill, 4),
                 "midpoint_at_entry": round(snap.price or 0.0, 4),
+                "requested_size": round(verdict.adjusted_size, 4),
+                "filled_size": round(actual_size, 4),
+                "fill_ratio": round(actual_size / verdict.adjusted_size, 4) if verdict.adjusted_size > 0 else 0.0,
+                "partial_fill": was_partial,
             }
             store.insert_decision(
                 timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
@@ -498,7 +581,7 @@ def _tick(
                 token_id=snap.token_id,
                 strategy=strategy.name,
                 confidence=sig.confidence,
-                entry_price=snap.price or 0,
+                entry_price=actual_fill,
                 features=entry_features,
             )
 
