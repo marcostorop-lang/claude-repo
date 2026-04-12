@@ -209,6 +209,18 @@ if (tableExists("market_resolutions") && tableExists("decision_log") && resoluti
   }
 }
 
+// === RISK REJECTION BREAKDOWN (by risk_detail) ===
+let rejectionBreakdown = [];
+if (tableExists("decision_log")) {
+  try {
+    const rows = query(
+      "SELECT COALESCE(NULLIF(risk_detail,''), 'other') as reason, COUNT(*) as cnt " +
+      "FROM decision_log WHERE action='RISK_REJECTED' GROUP BY reason ORDER BY cnt DESC LIMIT 12"
+    );
+    rejectionBreakdown = rows.map(r => ({ reason: r.reason, count: r.cnt }));
+  } catch (_) { /* non-fatal */ }
+}
+
 // === BOOK QUALITY METRICS (from recent ENTRY decisions) ===
 let bookQualityStats = null;
 if (tableExists("decision_log")) {
@@ -548,6 +560,22 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     </div>
     <div style="color:#9ca3af;font-size:12px;margin-top:6px">
       Well-calibrated models show increasing accuracy with higher confidence buckets.
+    </div>
+  </div>
+  ` : ''}
+  ${rejectionBreakdown.length > 0 ? `
+  <div style="margin-top:16px">
+    <h3>Risk rejection reasons</h3>
+    <div class="card overflow-x" style="padding:0;margin-top:8px">
+      <table>
+        <thead><tr><th>Reason</th><th class="text-right">Count</th></tr></thead>
+        <tbody>${rejectionBreakdown.map(r => `
+          <tr><td class="mono">${r.reason}</td><td class="text-right mono">${r.count}</td></tr>
+        `).join('')}</tbody>
+      </table>
+    </div>
+    <div style="color:#9ca3af;font-size:12px;margin-top:6px">
+      Gates ordered by frequency. stale_price = snap/book midpoint divergence; book_slippage = depth too thin; book_imbalance_contra = flow against our direction.
     </div>
   </div>
   ` : ''}

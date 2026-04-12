@@ -449,6 +449,32 @@ def _tick(
             is_book_price = True
             book_imbalance = ba.imbalance_5pct
 
+            # Stale-price / data-integrity gate — if the snapshot price
+            # (from /price) and the live book midpoint disagree materially,
+            # one of them is stale or the market just moved sharply. Either
+            # way, trading on inconsistent data is unsafe, so reject.
+            snap_price = snap.price or 0.0
+            divergence = 0.0
+            if snap_price > 0 and ba.midpoint > 0:
+                divergence = abs(snap_price - ba.midpoint) / ba.midpoint
+            if divergence > cfg.max_price_book_divergence:
+                risk_rejections += 1
+                store.insert_decision(
+                    timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                    action="RISK_REJECTED",
+                    reason=f"Stale price: snap={snap_price:.4f} vs book_mid={ba.midpoint:.4f} ({divergence:.2%})",
+                    strategy=strategy.name, confidence=sig.confidence,
+                    price=exec_price, spread=real_spread,
+                    signal_detail=sig.reason, risk_detail="stale_price",
+                    features={
+                        **sig.features,
+                        "snap_price": round(snap_price, 4),
+                        "book_mid": round(ba.midpoint, 4),
+                        "price_divergence": round(divergence, 6),
+                    },
+                )
+                continue
+
             # Second-chance spread gate using the real book
             if real_spread > cfg.max_spread:
                 risk_rejections += 1

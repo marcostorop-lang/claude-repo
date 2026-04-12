@@ -112,6 +112,13 @@ class Config:
     exit_on_edge_flip: bool = field(default_factory=lambda: _env_bool("EXIT_ON_EDGE_FLIP", False))
     exit_edge_flip_threshold: float = field(default_factory=lambda: _env_float("EXIT_EDGE_FLIP_THRESHOLD", 0.04))
 
+    # Max relative divergence between the snapshot price (from the /price
+    # endpoint, which can lag after low-activity periods) and the live book
+    # midpoint before we treat the snapshot as stale and reject the order.
+    # Default 3% — conservative enough to tolerate tick granularity without
+    # masking genuinely stale feeds.
+    max_price_book_divergence: float = field(default_factory=lambda: _env_float("MAX_PRICE_BOOK_DIVERGENCE", 0.03))
+
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))

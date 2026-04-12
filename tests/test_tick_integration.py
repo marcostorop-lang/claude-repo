@@ -236,6 +236,35 @@ class TestTickIntegration:
         assert portfolio.open_position_count() == 0
         store.close()
 
+    def test_tick_rejects_on_stale_price_feed(self):
+        """Snapshot price far from book midpoint → rejected as stale."""
+        cfg = _cfg(MAX_PRICE_BOOK_DIVERGENCE="0.03")
+        store = SQLiteStore(":memory:")
+        portfolio = PortfolioTracker()
+        risk = RiskManager(cfg, portfolio)
+        # Book mid at 0.55, but snapshot will claim 0.70 → 27% divergence
+        client = _make_client([0.70] * 10, _deep_book(mid=0.55))
+        strategy = _build_strategy(cfg, store=store)
+        executor = ExecutionEngine(client, cfg, store)
+
+        # Uptrend history so momentum would otherwise fire
+        for i, p in enumerate([0.60, 0.63, 0.66, 0.69]):
+            store.insert_price("tok1", p, f"2026-04-01T10:{i:02d}:00", spread=0.02)
+
+        market_svc = mock.MagicMock(spec=MarketDataService)
+        market_svc.fetch_and_filter.return_value = [
+            _make_snapshot(price=0.70, spread=0.02),
+        ]
+
+        _tick(market_svc, strategy, risk, executor, portfolio, store, client, cfg)
+
+        assert portfolio.open_position_count() == 0
+        decisions = store.get_decisions(limit=10)
+        rejections = [d for d in decisions if d["action"] == "RISK_REJECTED"]
+        assert any("stale_price" == (d.get("risk_detail") or "") for d in rejections), \
+            f"Expected stale_price rejection, got: {[d.get('risk_detail') for d in rejections]}"
+        store.close()
+
     def test_tick_records_tick_stats(self):
         """Every tick should persist a tick_stats row for observability."""
         cfg = _cfg()
