@@ -44,6 +44,7 @@ from src.config import Config
 from src.storage.sqlite_store import SQLiteStore
 from src.strategy.base import BaseStrategy
 from src.strategy.composite import CompositeStrategy
+from src.strategy.edge_based import EdgeBasedStrategy
 from src.strategy.mean_reversion import MeanReversion
 from src.strategy.simple_momentum import SimpleMomentum
 
@@ -55,6 +56,9 @@ def _build_strategy(cfg: Config, name: str) -> BaseStrategy:
         return MeanReversion(cfg)
     if name == "composite":
         return CompositeStrategy(cfg)
+    if name == "edge_based":
+        # Backtests run without a live store; strategy degrades to pure edge.
+        return EdgeBasedStrategy(cfg, store=None)
     return SimpleMomentum(cfg)
 
 

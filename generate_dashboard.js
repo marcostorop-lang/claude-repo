@@ -154,6 +154,20 @@ const marketsList = mkts.map(r => {
   return { question: r.question || r.condition_id, total_trades: r.total_trades, pnl: +mp.toFixed(2), win_rate: mc ? +(mw / mc * 100).toFixed(1) : 0, strategies: r.strategies || "-" };
 });
 
+// === RESOLUTION TRACKING ===
+let resolutionStats = { total: 0, correct: 0, accuracy: 0, pnl: 0 };
+if (tableExists("market_resolutions")) {
+  const rs = queryOne("SELECT COUNT(*) as total, SUM(prediction_correct) as correct, SUM(our_pnl) as pnl FROM market_resolutions");
+  if (rs && rs.total > 0) {
+    resolutionStats = {
+      total: rs.total,
+      correct: rs.correct || 0,
+      accuracy: rs.correct ? (rs.correct / rs.total * 100).toFixed(1) : "0",
+      pnl: rs.pnl || 0,
+    };
+  }
+}
+
 // === CALIBRATION ===
 let calibrationBuckets = [];
 if (tableExists("calibration")) {
@@ -433,6 +447,17 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     <div class="card"><div class="stat-val white">${decisionStats.entries}</div><div class="stat-label">Total Decisions</div></div>
     <div class="card"><div class="stat-val white">${botState ? botState.tick_count : '-'}</div><div class="stat-label">Ticks Completed</div></div>
   </div>
+  ${resolutionStats.total > 0 ? `
+  <div style="margin-top:12px">
+    <h3>Market Resolution Accuracy</h3>
+    <div class="grid4" style="margin-top:8px">
+      <div class="card"><div class="stat-val white">${resolutionStats.total}</div><div class="stat-label">Markets Resolved</div></div>
+      <div class="card"><div class="stat-val" style="color:${resolutionStats.accuracy >= 50 ? '#22c55e' : '#ef4444'}">${resolutionStats.accuracy}%</div><div class="stat-label">Prediction Accuracy</div></div>
+      <div class="card"><div class="stat-val green">${resolutionStats.correct}</div><div class="stat-label">Correct Predictions</div></div>
+      <div class="card"><div class="stat-val" style="color:${resolutionStats.pnl >= 0 ? '#22c55e' : '#ef4444'}">$${resolutionStats.pnl.toFixed(2)}</div><div class="stat-label">Resolution PnL</div></div>
+    </div>
+  </div>
+  ` : ''}
 </div>
 
 <div class="divider"></div>

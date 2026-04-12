@@ -33,6 +33,7 @@ class MarketSnapshot:
     active: bool
     category: str = ""
     end_date: str = ""
+    description: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -81,6 +82,7 @@ class MarketDataService:
             liquidity = _safe_float(mkt.get("liquidity") or mkt.get("liquidityNum"))
             category = mkt.get("category", "") or mkt.get("groupItemTitle", "") or ""
             end_date = mkt.get("endDate") or mkt.get("end_date_iso") or ""
+            description = mkt.get("description", "") or ""
 
             for i, token_id in enumerate(tokens):
                 outcome_label = outcomes[i] if i < len(outcomes) else f"outcome_{i}"
@@ -96,6 +98,7 @@ class MarketDataService:
                     active=bool(mkt.get("active", True)),
                     category=category,
                     end_date=end_date,
+                    description=description,
                 )
                 snapshots.append(snap)
 

@@ -210,6 +210,43 @@ class PolymarketClient:
             logger.debug("Failed to parse order book for %s", token_id[:12], exc_info=True)
             return None
 
+    def get_book_analysis(self, token_id: str, fill_size_usd: float = 50.0):
+        """Fetch the order book and return a full depth analysis.
+
+        Returns a BookAnalysis object or None on failure.  This is more
+        expensive than get_top_of_book() — use only at execution time.
+        """
+        from src.analysis.book_depth import BookLevel, analyze_book
+        book = self.get_order_book(token_id)
+        if not book:
+            return None
+        try:
+            raw_bids = getattr(book, "bids", None) or (book.get("bids") if isinstance(book, dict) else None) or []
+            raw_asks = getattr(book, "asks", None) or (book.get("asks") if isinstance(book, dict) else None) or []
+
+            def _parse_levels(raw) -> list[BookLevel]:
+                levels = []
+                for item in raw:
+                    price = getattr(item, "price", None)
+                    size = getattr(item, "size", None)
+                    if price is None and isinstance(item, dict):
+                        price = item.get("price")
+                        size = item.get("size")
+                    try:
+                        levels.append(BookLevel(float(price), float(size)))
+                    except (TypeError, ValueError):
+                        continue
+                return levels
+
+            bids = _parse_levels(raw_bids)
+            asks = _parse_levels(raw_asks)
+            if not bids or not asks:
+                return None
+            return analyze_book(bids, asks, fill_size_usd)
+        except Exception:
+            logger.debug("Failed to analyse book for %s", token_id[:12], exc_info=True)
+            return None
+
     # ------------------------------------------------------------------
     # Order placement (live only)
     # ------------------------------------------------------------------

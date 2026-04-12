@@ -31,6 +31,7 @@ from src.risk.manager import RiskManager
 from src.storage.sqlite_store import SQLiteStore
 from src.strategy.base import Action, BaseStrategy
 from src.strategy.composite import CompositeStrategy
+from src.strategy.edge_based import EdgeBasedStrategy
 from src.strategy.mean_reversion import MeanReversion
 from src.strategy.simple_momentum import SimpleMomentum
 from src.utils.time_utils import iso_now, utc_timestamp
@@ -47,11 +48,13 @@ def _handle_signal(signum, frame):
     _shutdown = True
 
 
-def _build_strategy(cfg: Config) -> BaseStrategy:
+def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrategy:
     if cfg.strategy == "mean_reversion":
         return MeanReversion(cfg)
     if cfg.strategy == "composite":
         return CompositeStrategy(cfg)
+    if cfg.strategy == "edge_based":
+        return EdgeBasedStrategy(cfg, store=store)
     return SimpleMomentum(cfg)
 
 
@@ -74,7 +77,7 @@ def run_loop(cfg: Config) -> None:
     risk_mgr = RiskManager(cfg, portfolio)
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
-    strategy = _build_strategy(cfg)
+    strategy = _build_strategy(cfg, store=store)
 
     mode_label = "PAPER" if cfg.is_paper else ("LIVE" if cfg.is_live else "PAPER (live not enabled)")
     logger.info("=== Bot started | mode=%s | strategy=%s | poll=%ds ===", mode_label, strategy.name, cfg.poll_interval)
@@ -577,7 +580,7 @@ def cmd_backtest(strategy: str, min_points: int, spread: float, output: str):
         cfg = Config()
 
     store = SQLiteStore(cfg.sqlite_db_path)
-    strat = _build_strategy(cfg)
+    strat = _build_strategy(cfg, store=store)
 
     histories = load_price_histories_from_store(store, min_points=min_points)
     if not histories:
@@ -644,6 +647,20 @@ def cmd_experiments(manifest: str):
     result = run_manifest(manifest, cfg, store)
     click.echo(result)
     store.close()
+
+
+@cli.command("check-resolutions")
+def cmd_check_resolutions():
+    """Check if any traded markets have resolved and record outcomes."""
+    from src.analysis.resolution_tracker import check_resolutions
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    client = PolymarketClient(cfg)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    result = check_resolutions(cfg, client, store)
+    click.echo(result)
+    store.close()
+    client.close()
 
 
 if __name__ == "__main__":

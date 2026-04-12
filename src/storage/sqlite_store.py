@@ -87,6 +87,23 @@ class SQLiteStore:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS market_resolutions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                condition_id    TEXT NOT NULL,
+                token_id        TEXT NOT NULL,
+                question        TEXT,
+                outcome         TEXT,
+                resolved_price  REAL,
+                resolution_ts   TEXT,
+                our_side        TEXT,
+                our_entry_price REAL,
+                our_exit_price  REAL,
+                our_pnl         REAL,
+                prediction_correct INTEGER,
+                checked_at      TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp       TEXT NOT NULL,
@@ -310,6 +327,63 @@ class SQLiteStore:
     def get_cached_markets(self) -> list[dict]:
         cur = self._conn.execute("SELECT * FROM markets_cache ORDER BY updated_at DESC")
         return [dict(row) for row in cur.fetchall()]
+
+    # -- Market resolutions ----------------------------------------------------
+
+    def insert_resolution(
+        self,
+        condition_id: str,
+        token_id: str,
+        question: str,
+        outcome: str,
+        resolved_price: float,
+        resolution_ts: str,
+        our_side: str,
+        our_entry_price: float,
+        our_exit_price: float,
+        our_pnl: float,
+        prediction_correct: bool,
+        checked_at: str,
+    ) -> None:
+        self._conn.execute(
+            "INSERT INTO market_resolutions "
+            "(condition_id, token_id, question, outcome, resolved_price, resolution_ts, "
+            "our_side, our_entry_price, our_exit_price, our_pnl, prediction_correct, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (condition_id, token_id, question, outcome, resolved_price, resolution_ts,
+             our_side, our_entry_price, our_exit_price, our_pnl, int(prediction_correct), checked_at),
+        )
+        self._conn.commit()
+
+    def get_resolutions(self) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT * FROM market_resolutions ORDER BY checked_at DESC"
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_resolution_stats(self) -> dict:
+        """Return aggregate resolution statistics."""
+        cur = self._conn.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(prediction_correct) as correct, "
+            "SUM(our_pnl) as total_pnl "
+            "FROM market_resolutions"
+        )
+        row = cur.fetchone()
+        total = row["total"] or 0
+        correct = row["correct"] or 0
+        total_pnl = row["total_pnl"] or 0.0
+        return {
+            "total_resolved": total,
+            "correct_predictions": correct,
+            "accuracy": correct / total if total > 0 else 0.0,
+            "total_pnl": total_pnl,
+        }
+
+    def get_traded_condition_ids(self) -> set[str]:
+        """Return all condition_ids where we have executed trades."""
+        cur = self._conn.execute("SELECT DISTINCT condition_id FROM trades")
+        return {row["condition_id"] for row in cur.fetchall()}
 
     def close(self) -> None:
         self._conn.close()
