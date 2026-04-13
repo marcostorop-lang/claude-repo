@@ -58,6 +58,26 @@ def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrate
     return SimpleMomentum(cfg)
 
 
+def _accrue_fill_fee(
+    cfg: Config,
+    portfolio: PortfolioTracker,
+    filled_size: float,
+    fill_price: float,
+) -> None:
+    """Record the execution fee for a fill, if the fee model is enabled.
+
+    No-op when ``taker_fee_bps == 0`` (default).  Keeping the call site-
+    unconditional keeps the trading flow identical whether fees are on or
+    off — only the fee counter changes.
+    """
+    if filled_size <= 0 or fill_price <= 0:
+        return
+    # Always compute; helper returns 0 when bps==0.
+    from src.analysis.fees import compute_fee_usd
+    notional = filled_size * fill_price
+    portfolio.record_fee(compute_fee_usd(cfg, notional, is_maker=False))
+
+
 # ---------------------------------------------------------------------------
 # Bot loop
 # ---------------------------------------------------------------------------
@@ -177,6 +197,9 @@ def _check_exits_only(
         result = executor.execute(order)
         if result.success:
             entry_price = pos.entry_price
+            fill_size = result.filled_size if result.filled_size > 0 else pos.size
+            fill_px = result.fill_price if result.fill_price > 0 else current_price
+            _accrue_fill_fee(cfg, portfolio, fill_size, fill_px)
             pnl = portfolio.close_position(token_id, current_price)
             risk_mgr.record_realized_pnl(pnl)
             return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
@@ -330,6 +353,9 @@ def _tick(
         result = executor.execute(order)
         if result.success:
             entry_price = pos.entry_price
+            fill_size = result.filled_size if result.filled_size > 0 else pos.size
+            fill_px = result.fill_price if result.fill_price > 0 else current_price
+            _accrue_fill_fee(cfg, portfolio, fill_size, fill_px)
             pnl = portfolio.close_position(token_id, current_price)
             risk_mgr.record_realized_pnl(pnl)
             return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
@@ -567,6 +593,7 @@ def _tick(
             # Use actual filled size (may be partial if book depth < requested)
             actual_size = result.filled_size if result.filled_size > 0 else verdict.adjusted_size
             actual_fill = result.fill_price if result.fill_price > 0 else exec_price
+            _accrue_fill_fee(cfg, portfolio, actual_size, actual_fill)
             portfolio.open_position(
                 Position(
                     token_id=snap.token_id,
@@ -843,6 +870,25 @@ def cmd_edge_calibration():
     setup_logging(cfg.log_level)
     store = SQLiteStore(cfg.sqlite_db_path)
     report = analyze_edge_calibration(store)
+    click.echo(format_report_markdown(report))
+    store.close()
+
+
+@cli.command("performance-report")
+def cmd_performance_report():
+    """Print risk-adjusted performance metrics (Sharpe, Sortino, expectancy, Calmar).
+
+    Read-only: joins closed BUY/SELL pairs from the trade log and computes
+    quant-standard metrics.  Does not touch portfolio or trading state.
+    """
+    from src.analysis.performance_metrics import (
+        build_trade_pnls_from_store, compute_performance, format_report_markdown,
+    )
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    closed = build_trade_pnls_from_store(store)
+    report = compute_performance(closed)
     click.echo(format_report_markdown(report))
     store.close()
 

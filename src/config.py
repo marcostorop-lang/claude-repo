@@ -119,6 +119,16 @@ class Config:
     # masking genuinely stale feeds.
     max_price_book_divergence: float = field(default_factory=lambda: _env_float("MAX_PRICE_BOOK_DIVERGENCE", 0.03))
 
+    # -- Execution-cost model (opt-in) -----------------------------------------
+    # Hypothetical fee schedule in basis points of notional.  Both default
+    # to 0 (Polymarket's current CLOB charges no fee), so enabling this is
+    # strictly additive and reversible — no existing trade accounting
+    # changes until an operator sets a non-zero value.  Fees never modify
+    # recorded fill prices; they accumulate in PortfolioTracker.fees_paid
+    # and are reported alongside gross PnL.
+    taker_fee_bps: float = field(default_factory=lambda: _env_float("TAKER_FEE_BPS", 0.0))
+    maker_fee_bps: float = field(default_factory=lambda: _env_float("MAKER_FEE_BPS", 0.0))
+
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))

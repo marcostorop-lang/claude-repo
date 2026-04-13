@@ -41,6 +41,11 @@ class PortfolioTracker:
 
     positions: dict[str, Position] = field(default_factory=dict)
     realised_pnl: float = 0.0
+    # Cumulative execution fees paid.  Stays at 0.0 unless the opt-in fee
+    # model (TAKER_FEE_BPS / MAKER_FEE_BPS) is enabled.  Tracked separately
+    # from realised_pnl so the gross trading signal stays uncontaminated —
+    # the dashboard computes net = realised_pnl - fees_paid explicitly.
+    fees_paid: float = 0.0
 
     def open_position(self, pos: Position) -> None:
         """Open a new position or add to an existing one.
@@ -267,12 +272,30 @@ class PortfolioTracker:
             len(self.positions), self.realised_pnl,
         )
 
+    def record_fee(self, fee_usd: float) -> None:
+        """Add to the cumulative fees-paid counter.
+
+        A no-op when ``fee_usd`` is zero or negative — matches the
+        default-off fee model where :func:`src.analysis.fees.compute_fee_usd`
+        always returns 0.0.
+        """
+        if fee_usd and fee_usd > 0:
+            self.fees_paid += fee_usd
+
     def summary(self, price_fn=None) -> dict:
         unrealised = self.total_unrealised_pnl(price_fn) if price_fn else 0.0
+        gross_net = self.realised_pnl + unrealised
         return {
             "open_positions": self.open_position_count(),
             "total_exposure": self.total_exposure(),
             "realised_pnl": self.realised_pnl,
             "unrealised_pnl": unrealised,
-            "net_pnl": self.realised_pnl + unrealised,
+            # "net_pnl" historically meant gross (realised + unrealised).
+            # We preserve that meaning for backwards compat with the
+            # dashboard and tick_stats schema.  When fees are enabled,
+            # callers can compute a fee-adjusted net via
+            # ``summary()["net_pnl"] - summary()["fees_paid"]``.
+            "net_pnl": gross_net,
+            "fees_paid": self.fees_paid,
+            "net_pnl_after_fees": gross_net - self.fees_paid,
         }

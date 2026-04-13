@@ -111,6 +111,43 @@ const p = {
   total_closed: closed.length, winning: cw.length, losing: cl.length,
 };
 
+// === RISK-ADJUSTED METRICS (Sharpe, Sortino, expectancy, Calmar) ===
+// Read-only analytics — does not affect trading logic.
+const riskAdj = (() => {
+  const n = closed.length;
+  if (n === 0) return null;
+  const pnls = closed.map(c => c.pnl);
+  const expectancy = pnls.reduce((a, b) => a + b, 0) / n;
+  // Population stdev of trade PnL
+  const mu = expectancy;
+  const variance = n > 1 ? pnls.reduce((s, x) => s + (x - mu) ** 2, 0) / n : 0;
+  const sd = Math.sqrt(variance);
+  // Daily-bucketed Sharpe/Sortino (annualised, trading-day convention)
+  const daily = Object.values(dailyPnl.reduce((acc, d) => { acc[d.date] = d.pnl; return acc; }, {}));
+  let sharpe = 0, sortino = 0;
+  if (daily.length >= 2) {
+    const muD = daily.reduce((a, b) => a + b, 0) / daily.length;
+    const varD = daily.reduce((s, x) => s + (x - muD) ** 2, 0) / daily.length;
+    const sdD = Math.sqrt(varD);
+    const downside = daily.map(v => Math.min(0, v));
+    const dsdVar = downside.reduce((s, x) => s + x * x, 0) / daily.length;
+    const dsdD = Math.sqrt(dsdVar);
+    const sqrt252 = Math.sqrt(252);
+    sharpe = sdD > 0 ? (muD / sdD) * sqrt252 : 0;
+    sortino = dsdD > 0 ? (muD / dsdD) * sqrt252 : 0;
+  }
+  const calmar = maxDd > 0 ? cum / maxDd : 0;
+  return {
+    expectancy: +expectancy.toFixed(4),
+    stdev_trade_pnl: +sd.toFixed(4),
+    sharpe_daily: +sharpe.toFixed(2),
+    sortino_daily: +sortino.toFixed(2),
+    calmar: +calmar.toFixed(2),
+    best_trade: +Math.max(...pnls).toFixed(4),
+    worst_trade: +Math.min(...pnls).toFixed(4),
+  };
+})();
+
 // === TRADES ===
 const trades = query("SELECT t.*, m.question FROM trades t LEFT JOIN markets_cache m ON t.condition_id = m.condition_id ORDER BY t.timestamp DESC LIMIT 30");
 
@@ -474,6 +511,21 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     <div class="card"><div class="stat-val green">${p.winning}</div><div class="stat-label">Winning</div></div>
     <div class="card"><div class="stat-val red">${p.losing}</div><div class="stat-label">Losing</div></div>
   </div>
+  ${riskAdj ? `
+  <div style="margin-top:16px">
+    <h3>Risk-adjusted metrics</h3>
+    <div class="grid4" style="margin-top:8px">
+      <div class="card"><div class="stat-val white">${riskAdj.sharpe_daily}</div><div class="stat-label">Sharpe (annualised)</div></div>
+      <div class="card"><div class="stat-val white">${riskAdj.sortino_daily}</div><div class="stat-label">Sortino (annualised)</div></div>
+      <div class="card"><div class="stat-val white">${riskAdj.calmar}</div><div class="stat-label">Calmar (pnl / max_dd)</div></div>
+      <div class="card"><div class="stat-val white">$${riskAdj.expectancy.toFixed(4)}</div><div class="stat-label">Expectancy / trade</div></div>
+    </div>
+    <div style="color:#9ca3af;font-size:12px;margin-top:6px">
+      Sharpe/Sortino bucketed by day and annualised (×√252). Expectancy = avg PnL per trade.
+      Positive expectancy + positive Sortino = system worth scaling; negative Sortino = bleeding on down days.
+    </div>
+  </div>
+  ` : ''}
   <div class="card">
     <h3>Daily PnL</h3>
     <div class="bar-chart">${barsHtml}</div>
