@@ -161,14 +161,24 @@ class RiskManager:
         # The edge-based strategy publishes the signed edge in features.
         # If configured, reject trades below the threshold even if confidence
         # is high (e.g., high confidence of a 0.005 edge is not worth trading).
-        if self.cfg.min_edge_for_trade > 0:
+        # When MIN_EDGE_BY_CATEGORY is populated, the per-category value
+        # overrides the global — categories with noisier resolution or
+        # wider spreads can require a bigger edge without dragging the
+        # global threshold up for everyone.
+        effective_min_edge = (
+            self.cfg.effective_min_edge(category)
+            if hasattr(self.cfg, "effective_min_edge")
+            else self.cfg.min_edge_for_trade
+        )
+        if effective_min_edge > 0:
             sig_edge = signal.features.get("edge") if signal.features else None
             if sig_edge is not None:
                 try:
-                    if abs(float(sig_edge)) < self.cfg.min_edge_for_trade:
+                    if abs(float(sig_edge)) < effective_min_edge:
                         return RiskVerdict(
                             False, 0.0,
-                            f"Edge {float(sig_edge):+.4f} below min {self.cfg.min_edge_for_trade:.4f}.",
+                            f"Edge {float(sig_edge):+.4f} below min {effective_min_edge:.4f} "
+                            f"(category='{category}').",
                         )
                 except (TypeError, ValueError):
                     pass

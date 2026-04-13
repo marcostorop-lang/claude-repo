@@ -36,6 +36,10 @@ class OrderRequest:
     # and log a partial fill.  None or 0 means no depth constraint was computed
     # (behave as before — assume full fill).
     max_fillable_size: float | None = None
+    # Order posting type: "taker" (crosses the spread, immediate fill — default)
+    # or "maker" (posts passively; paper engine simulates probabilistic fill).
+    # Only honoured by the paper executor; live execution always takes.
+    order_type: str = "taker"
 
 
 @dataclass
@@ -68,7 +72,60 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
 
     def _paper_execute(self, order: OrderRequest) -> OrderResult:
+        import random
         import uuid
+
+        # ------------------------------------------------------------------
+        # Maker path (paper-only).  The caller has already set ``price`` to
+        # the passive side of the book (best_bid for BUY, best_ask for SELL)
+        # and flagged ``order_type="maker"``.  We simulate fill probability
+        # per tick — on a miss we record no trade and no decision contamination.
+        # ------------------------------------------------------------------
+        if order.order_type == "maker":
+            fill_prob = max(0.0, min(1.0, float(self.cfg.maker_fill_prob)))
+            filled = random.random() < fill_prob
+            if not filled:
+                logger.info(
+                    "[PAPER-MAKER] %s %.4f of %s @ %.4f did NOT fill this tick "
+                    "(prob=%.2f).",
+                    order.side, order.size, order.token_id[:12],
+                    order.price, fill_prob,
+                )
+                return OrderResult(
+                    success=False, order_id="", mode="paper",
+                    message=f"Maker quote did not fill (p={fill_prob:.2f}).",
+                    filled_size=0.0, fill_price=0.0,
+                )
+            # Maker fill: price is exactly the posted level, no slippage,
+            # no book-depth partial handling (passive quote sat until taken).
+            fill_price = max(order.price, 0.0001)
+            filled_size = order.size
+            order_id = f"paper-maker-{uuid.uuid4().hex[:12]}"
+            self.store.insert_trade(
+                order_id=order_id,
+                token_id=order.token_id,
+                condition_id=order.condition_id,
+                side=order.side,
+                size=filled_size,
+                price=fill_price,
+                strategy=order.strategy,
+                mode="paper",
+                timestamp=iso_now(),
+                exit_reason=order.exit_reason,
+                spread_at_entry=order.spread,
+            )
+            logger.info(
+                "[PAPER-MAKER] %s %.4f of %s @ %.4f FILLED (prob=%.2f, "
+                "strategy=%s%s)",
+                order.side, filled_size, order.token_id[:12], fill_price,
+                fill_prob, order.strategy,
+                f", exit_reason={order.exit_reason}" if order.exit_reason else "",
+            )
+            return OrderResult(
+                success=True, order_id=order_id, mode="paper",
+                message=f"Paper maker fill (price={fill_price:.4f}).",
+                filled_size=filled_size, fill_price=fill_price,
+            )
 
         # Slippage simulation.
         #

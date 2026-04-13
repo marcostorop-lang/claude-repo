@@ -377,6 +377,21 @@ def _tick(
     snapshots = market_svc.fetch_and_filter()
     logger.info("Evaluating %d market snapshots.", len(snapshots))
 
+    # 2b. Opt-in negative-risk arb scan.  READ-ONLY observer — never
+    # trades.  Runs after filtering so it sees the same markets the bot
+    # would trade, but we don't gate anything on its findings.
+    if getattr(cfg, "arb_detector_enabled", False):
+        try:
+            from src.analysis.arb_detector import scan_and_record
+            scan_and_record(
+                snapshots, store, tick_ts,
+                min_discount=cfg.arb_min_discount,
+                min_legs_liquidity=cfg.arb_min_legs_liquidity,
+            )
+        except Exception:
+            # Non-fatal: a broken detector must never break the tick loop.
+            logger.exception("Arb detector crashed — skipping this tick.")
+
     # 3. Evaluate strategy on each snapshot
     signals_generated = 0
     risk_rejections = 0
@@ -574,7 +589,55 @@ def _tick(
             elif sig.action == Action.SELL and ba.best_bid > 0:
                 max_fillable_size = ba.bid_depth_5pct / ba.best_bid
 
-        # 7. Execute
+        # 7. Execute (or observe, under shadow mode)
+        #
+        # Shadow mode short-circuits here: we record a SHADOW_ENTRY_* decision
+        # so the operator can compare signal quality across configs, but we
+        # skip execution, portfolio updates, and calibration so shadow runs
+        # never contaminate real paper PnL.  Exits are also suppressed
+        # (we don't open anything to exit).
+        if getattr(cfg, "shadow_mode", False):
+            store.insert_decision(
+                timestamp=tick_ts, token_id=snap.token_id, condition_id=snap.condition_id,
+                action=f"SHADOW_ENTRY_{sig.action.value}",
+                reason=sig.reason,
+                strategy=strategy.name, confidence=sig.confidence,
+                price=exec_price, spread=exec_spread,
+                signal_detail=sig.reason,
+                features={
+                    **sig.features,
+                    "shadow": True,
+                    "would_size": round(verdict.adjusted_size, 4),
+                    "would_price": round(exec_price, 4),
+                    "book_imbalance_5pct": round(book_imbalance, 4),
+                    "slippage_pct": round(slippage_pct, 6),
+                },
+            )
+            continue
+
+        # Maker-preferred mode (paper-only experiment): override exec_price
+        # to the passive side of the book and tag the order as a maker.  We
+        # only engage when a live book analysis is available, so the price
+        # we post is the *current* best bid/ask — otherwise we fall back to
+        # the existing taker behaviour.  Entries only; exits keep crossing
+        # so circuit-breaker / stop-loss exits are never stranded on a
+        # passive queue.
+        order_type = "taker"
+        if (
+            getattr(cfg, "order_mode", "taker") == "maker_preferred"
+            and ba is not None
+            and ba.best_bid > 0
+            and ba.best_ask > 0
+        ):
+            order_type = "maker"
+            if sig.action == Action.BUY:
+                exec_price = ba.best_bid
+            else:
+                exec_price = ba.best_ask
+            is_book_price = True
+            # Maker quote sits in queue — no book-depth partial-fill cap.
+            max_fillable_size = None
+
         order = OrderRequest(
             token_id=snap.token_id,
             condition_id=snap.condition_id,
@@ -585,8 +648,33 @@ def _tick(
             spread=exec_spread,
             is_book_price=is_book_price,
             max_fillable_size=max_fillable_size,
+            order_type=order_type,
         )
         result = executor.execute(order)
+
+        # Record maker-miss as a decision so operators can see the signal
+        # fired and a passive quote was posted but nobody took it.  No
+        # position or trade is ever recorded — this branch is pure telemetry.
+        if (
+            not result.success
+            and order_type == "maker"
+            and sig.action == Action.BUY
+        ):
+            store.insert_decision(
+                timestamp=tick_ts, token_id=snap.token_id,
+                condition_id=snap.condition_id,
+                action="MAKER_MISS",
+                reason=result.message or "Maker quote not filled",
+                strategy=strategy.name, confidence=sig.confidence,
+                price=exec_price, spread=exec_spread,
+                signal_detail=sig.reason,
+                features={
+                    **sig.features,
+                    "maker_fill_prob": round(float(cfg.maker_fill_prob), 4),
+                    "would_size": round(verdict.adjusted_size, 4),
+                    "posted_price": round(exec_price, 4),
+                },
+            )
 
         if result.success and sig.action == Action.BUY:
             trades_executed += 1
@@ -871,6 +959,37 @@ def cmd_edge_calibration():
     store = SQLiteStore(cfg.sqlite_db_path)
     report = analyze_edge_calibration(store)
     click.echo(format_report_markdown(report))
+    store.close()
+
+
+@cli.command("detect-arbs")
+@click.option("--min-discount", type=float, default=None,
+              help="Override ARB_MIN_DISCOUNT (e.g. 0.02 = 2%).")
+@click.option("--limit", type=int, default=20, help="Max rows in output table.")
+def cmd_detect_arbs(min_discount, limit):
+    """Scan current Polymarket markets for negative-risk arbs (read-only).
+
+    Never places trades.  Records detections to ``arb_opportunities`` so
+    operators can review and decide whether to act manually.
+    """
+    from src.analysis.arb_detector import (
+        find_negative_risk_arbs, scan_and_record, format_report_markdown,
+    )
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    client = PolymarketClient(cfg)
+    market_svc = MarketDataService(client, cfg)
+    click.echo("Fetching markets...")
+    snapshots = market_svc.fetch_and_filter()
+    click.echo(f"Scanning {len(snapshots)} snapshots for negative-risk arbs...")
+    disc = min_discount if min_discount is not None else cfg.arb_min_discount
+    arbs = scan_and_record(
+        snapshots, store, iso_now(),
+        min_discount=disc,
+        min_legs_liquidity=cfg.arb_min_legs_liquidity,
+    )
+    click.echo(format_report_markdown(arbs, limit=limit))
     store.close()
 
 

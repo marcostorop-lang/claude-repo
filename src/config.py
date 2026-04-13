@@ -7,6 +7,7 @@ throughout the application to avoid re-reading the environment.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,6 +35,24 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return _env(key, str(default)).lower() in ("true", "1", "yes")
 
 
+def _env_json_dict(key: str, default: dict | None = None) -> dict:
+    """Parse a JSON-dict env var, returning ``default`` on missing or invalid.
+
+    Keeps config loading robust: a malformed override never crashes the
+    bot — it's silently ignored and the caller falls back to globals.
+    """
+    raw = _env(key, "").strip()
+    if not raw:
+        return dict(default or {})
+    try:
+        val = json.loads(raw)
+        if isinstance(val, dict):
+            return val
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return dict(default or {})
+
+
 @dataclass(frozen=True)
 class Config:
     """Immutable application configuration."""
@@ -41,6 +60,12 @@ class Config:
     # -- Trading mode ----------------------------------------------------------
     trading_mode: str = field(default_factory=lambda: _env("TRADING_MODE", "paper"))
     allow_live_trading: bool = field(default_factory=lambda: _env_bool("ALLOW_LIVE_TRADING"))
+    # Shadow mode: generates signals, runs risk checks, persists decisions
+    # to decision_log, but never calls the executor and never updates
+    # portfolio state.  Useful for A/B testing a new strategy config
+    # alongside the regular paper run (with a distinct SQLITE_DB_PATH)
+    # without contaminating the real paper PnL.  Default: off.
+    shadow_mode: bool = field(default_factory=lambda: _env_bool("SHADOW_MODE", False))
 
     # -- Polymarket endpoints --------------------------------------------------
     clob_url: str = field(default_factory=lambda: _env("POLYMARKET_CLOB_URL", "https://clob.polymarket.com"))
@@ -105,6 +130,14 @@ class Config:
     kelly_fraction: float = field(default_factory=lambda: _env_float("KELLY_FRACTION", 0.25))
     # Minimum edge magnitude to trade (below this → HOLD regardless of confidence)
     min_edge_for_trade: float = field(default_factory=lambda: _env_float("MIN_EDGE_FOR_TRADE", 0.0))
+    # Optional per-category overrides for MIN_EDGE_FOR_TRADE.  Expected as
+    # a JSON dict in the env, e.g.
+    #   MIN_EDGE_BY_CATEGORY='{"politics": 0.03, "sports": 0.05}'
+    # When a snapshot's category matches a key here, that value overrides
+    # the global threshold *for that trade only*.  Unmatched categories
+    # fall back to the global — so enabling this is strictly additive and
+    # reversible.  An empty dict (the default) disables the feature.
+    min_edge_by_category: dict = field(default_factory=lambda: _env_json_dict("MIN_EDGE_BY_CATEGORY"))
     # Exit early when the edge model re-evaluates and flips direction against
     # our open position.  Only applies to positions opened by strategies that
     # expose an edge estimate (e.g. edge_based).  Requires |edge| > this value
@@ -119,6 +152,15 @@ class Config:
     # masking genuinely stale feeds.
     max_price_book_divergence: float = field(default_factory=lambda: _env_float("MAX_PRICE_BOOK_DIVERGENCE", 0.03))
 
+    # -- Negative-risk arbitrage detector (opt-in, read-only) -----------------
+    # When enabled, each tick scans the filtered market snapshots for
+    # structural arbs (sum of outcome-prices < 1) and records detections
+    # to ``arb_opportunities``.  Never places trades automatically — this
+    # is purely observational.  Default: off.
+    arb_detector_enabled: bool = field(default_factory=lambda: _env_bool("ARB_DETECTOR_ENABLED", False))
+    arb_min_discount: float = field(default_factory=lambda: _env_float("ARB_MIN_DISCOUNT", 0.01))
+    arb_min_legs_liquidity: float = field(default_factory=lambda: _env_float("ARB_MIN_LEGS_LIQUIDITY", 100.0))
+
     # -- Execution-cost model (opt-in) -----------------------------------------
     # Hypothetical fee schedule in basis points of notional.  Both default
     # to 0 (Polymarket's current CLOB charges no fee), so enabling this is
@@ -128,6 +170,18 @@ class Config:
     # and are reported alongside gross PnL.
     taker_fee_bps: float = field(default_factory=lambda: _env_float("TAKER_FEE_BPS", 0.0))
     maker_fee_bps: float = field(default_factory=lambda: _env_float("MAKER_FEE_BPS", 0.0))
+
+    # -- Order posting mode (paper-only experiment) ---------------------------
+    # ``taker``           — cross the spread; fill is immediate at VWAP/ask
+    #                       (current behaviour, default).
+    # ``maker_preferred`` — post passively at best_bid (BUY) / best_ask (SELL).
+    #                       Paper engine simulates a fill probability per
+    #                       tick via ``MAKER_FILL_PROB``.  On a miss the
+    #                       signal is simply dropped for that tick (we never
+    #                       fake a fill).  No live-mode behaviour change.
+    # Strictly opt-in — default preserves paper PnL exactly.
+    order_mode: str = field(default_factory=lambda: _env("ORDER_MODE", "taker"))
+    maker_fill_prob: float = field(default_factory=lambda: _env_float("MAKER_FILL_PROB", 0.7))
 
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
@@ -154,6 +208,23 @@ class Config:
             self.trading_mode.lower() == "live"
             and self.allow_live_trading
         )
+
+    def effective_min_edge(self, category: str = "") -> float:
+        """Return the min-edge threshold for a given market category.
+
+        Resolution order: exact per-category override → global fallback.
+        Absent categories or an empty override dict both yield the
+        global :attr:`min_edge_for_trade`, so the default behaviour is
+        unchanged.
+        """
+        if category and self.min_edge_by_category:
+            try:
+                val = self.min_edge_by_category.get(category)
+                if val is not None:
+                    return float(val)
+            except (TypeError, ValueError):
+                pass
+        return self.min_edge_for_trade
 
     def validate(self) -> list[str]:
         """Return a list of configuration problems (empty == OK)."""

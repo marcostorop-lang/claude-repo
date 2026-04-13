@@ -104,6 +104,21 @@ class SQLiteStore:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS arb_opportunities (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT NOT NULL,
+                condition_id    TEXT NOT NULL,
+                question        TEXT,
+                kind            TEXT NOT NULL,
+                sum_prices      REAL NOT NULL,
+                discount        REAL NOT NULL,
+                edge_pct        REAL NOT NULL,
+                legs_json       TEXT,
+                category        TEXT,
+                min_liquidity   REAL
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp       TEXT NOT NULL,
@@ -270,6 +285,52 @@ class SQLiteStore:
         return [dict(row) for row in cur.fetchall()]
 
     # -- Tick stats ------------------------------------------------------------
+
+    # -- Arbitrage opportunities (read-only observer) --------------------------
+
+    def insert_arb_opportunities(self, timestamp: str, arbs) -> None:
+        """Persist a batch of detected arb opportunities.
+
+        ``arbs`` is a sequence of :class:`src.analysis.arb_detector.ArbOpportunity`.
+        We serialise the ``legs`` list as JSON for forensic reconstruction.
+        Fails silently if the table does not yet exist (allows old DBs to
+        run without migration).
+        """
+        import json
+        rows = []
+        for a in arbs:
+            rows.append((
+                timestamp,
+                a.condition_id,
+                a.question or "",
+                a.kind,
+                float(a.sum_prices),
+                float(a.discount),
+                float(a.edge_pct),
+                json.dumps(list(a.legs)),
+                a.category or "",
+                float(a.min_liquidity),
+            ))
+        if not rows:
+            return
+        self._conn.executemany(
+            "INSERT INTO arb_opportunities "
+            "(timestamp, condition_id, question, kind, sum_prices, discount, "
+            "edge_pct, legs_json, category, min_liquidity) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+
+    def get_recent_arb_opportunities(self, limit: int = 50) -> list[dict]:
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM arb_opportunities ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        except sqlite3.OperationalError:
+            return []
 
     def insert_tick_stats(
         self,
