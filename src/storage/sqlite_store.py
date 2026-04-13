@@ -119,6 +119,34 @@ class SQLiteStore:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS semantic_signals (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp             TEXT NOT NULL,
+                token_id              TEXT NOT NULL,
+                condition_id          TEXT NOT NULL,
+                question              TEXT,
+                category              TEXT,
+                side                  TEXT NOT NULL,
+                best_bid              REAL NOT NULL,
+                best_ask              REAL NOT NULL,
+                midpoint              REAL NOT NULL,
+                spread                REAL NOT NULL,
+                liquidity             REAL NOT NULL,
+                synthetic_fair        REAL NOT NULL,
+                synthetic_lower       REAL NOT NULL,
+                synthetic_upper       REAL NOT NULL,
+                synthetic_method      TEXT NOT NULL,
+                synthetic_confidence  REAL NOT NULL,
+                synthetic_contributors_n INTEGER NOT NULL,
+                gross_edge            REAL NOT NULL,
+                net_edge              REAL NOT NULL,
+                score                 REAL NOT NULL,
+                relations_json        TEXT,
+                features_json         TEXT,
+                mode                  TEXT NOT NULL DEFAULT 'shadow'
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp       TEXT NOT NULL,
@@ -326,6 +354,84 @@ class SQLiteStore:
         try:
             cur = self._conn.execute(
                 "SELECT * FROM arb_opportunities ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+    # -- Semantic mispricing signals (read-only observer) ---------------------
+
+    def insert_semantic_signals(self, timestamp: str, mispricings, mode: str = "shadow") -> None:
+        """Persist detected semantic mispricings.
+
+        ``mispricings`` is a sequence of
+        :class:`src.analysis.semantic_engine.types.SemanticMispricing`.
+        The ``relations`` and ``features`` are serialised as JSON for
+        forensic reconstruction.  Silent no-op on missing table so old DBs
+        still run without migration (observer pattern — must never break
+        the tick).
+        """
+        import json
+        rows = []
+        for m in mispricings:
+            rels_payload = [
+                {
+                    "target": r.target_token_id,
+                    "sibling": r.sibling_token_id,
+                    "kind": r.kind.value,
+                    "confidence": r.confidence,
+                    "reason": r.reason,
+                    "evidence": r.evidence,
+                }
+                for r in m.relations
+            ]
+            rows.append((
+                timestamp,
+                m.token_id,
+                m.condition_id,
+                m.question or "",
+                m.category or "",
+                m.side,
+                float(m.best_bid),
+                float(m.best_ask),
+                float(m.midpoint),
+                float(m.spread),
+                float(m.liquidity),
+                float(m.synthetic.point),
+                float(m.synthetic.lower),
+                float(m.synthetic.upper),
+                m.synthetic.method,
+                float(m.synthetic.confidence),
+                int(m.synthetic.n_contributors),
+                float(m.gross_edge),
+                float(m.net_edge),
+                float(m.score),
+                json.dumps(rels_payload),
+                json.dumps(m.features),
+                mode,
+            ))
+        if not rows:
+            return
+        try:
+            self._conn.executemany(
+                "INSERT INTO semantic_signals "
+                "(timestamp, token_id, condition_id, question, category, side, "
+                "best_bid, best_ask, midpoint, spread, liquidity, "
+                "synthetic_fair, synthetic_lower, synthetic_upper, synthetic_method, "
+                "synthetic_confidence, synthetic_contributors_n, "
+                "gross_edge, net_edge, score, relations_json, features_json, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError as exc:
+            logger.warning("insert_semantic_signals skipped: %s", exc)
+
+    def get_recent_semantic_signals(self, limit: int = 50) -> list[dict]:
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM semantic_signals ORDER BY id DESC LIMIT ?",
                 (limit,),
             )
             return [dict(row) for row in cur.fetchall()]

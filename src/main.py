@@ -33,6 +33,7 @@ from src.strategy.base import Action, BaseStrategy
 from src.strategy.composite import CompositeStrategy
 from src.strategy.edge_based import EdgeBasedStrategy
 from src.strategy.mean_reversion import MeanReversion
+from src.strategy.semantic_mispricing import SemanticMispricingStrategy
 from src.strategy.simple_momentum import SimpleMomentum
 from src.utils.time_utils import iso_now, utc_timestamp
 
@@ -55,6 +56,8 @@ def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrate
         return CompositeStrategy(cfg)
     if cfg.strategy == "edge_based":
         return EdgeBasedStrategy(cfg, store=store)
+    if cfg.strategy == "semantic_mispricing":
+        return SemanticMispricingStrategy(cfg)
     return SimpleMomentum(cfg)
 
 
@@ -391,6 +394,69 @@ def _tick(
         except Exception:
             # Non-fatal: a broken detector must never break the tick loop.
             logger.exception("Arb detector crashed — skipping this tick.")
+
+    # 2c. Opt-in Semantic Mispricing Engine scan.  READ-ONLY observer when
+    # STRATEGY is something else; feeds the strategy adapter when
+    # STRATEGY=semantic_mispricing.  Gated entirely behind
+    # ``semantic_engine_enabled`` — default off, zero cost when disabled.
+    semantic_mispricings: list = []
+    if getattr(cfg, "semantic_engine_enabled", False):
+        try:
+            from src.analysis.semantic_engine import scan_and_record as semantic_scan
+            from src.analysis.semantic_engine.relations import RelationClassifierConfig
+            from src.analysis.semantic_engine.scoring import ScoringConfig
+
+            rel_cfg = RelationClassifierConfig(
+                disable_textual=not cfg.semantic_use_textual_links,
+                disable_temporal=not cfg.semantic_use_temporal_links,
+                disable_inverse=not cfg.semantic_use_inverse_links,
+            )
+            sc_cfg = ScoringConfig(
+                max_spread=cfg.semantic_max_spread,
+                min_liquidity=cfg.semantic_min_liquidity,
+                taker_fee_bps=cfg.taker_fee_bps,
+                maker_fee_bps=cfg.maker_fee_bps,
+                safety_margin_bps=cfg.semantic_safety_margin_bps,
+            )
+            prefer_maker = cfg.semantic_execution_preference == "maker"
+            semantic_mispricings = semantic_scan(
+                snapshots, store, tick_ts,
+                relation_cfg=rel_cfg,
+                scoring_cfg=sc_cfg,
+                min_relation_confidence=cfg.semantic_min_relation_confidence,
+                min_net_edge=cfg.semantic_min_net_edge,
+                min_signal_score=cfg.semantic_min_signal_score,
+                max_related_per_target=cfg.semantic_max_related_markets,
+                min_sibling_liquidity=cfg.semantic_min_sibling_liquidity,
+                prefer_maker=prefer_maker,
+            )
+            if semantic_mispricings:
+                logger.info(
+                    "Semantic engine: %d mispricings (mode=%s).",
+                    len(semantic_mispricings), cfg.semantic_engine_mode,
+                )
+        except Exception:
+            # Non-fatal: a broken engine must never break the tick loop.
+            logger.exception("Semantic engine crashed — skipping this tick.")
+            semantic_mispricings = []
+
+    # Feed the strategy adapter if it subscribes to this context.  Strategies
+    # that don't care (most) simply don't implement the method.
+    if hasattr(strategy, "set_semantic_context"):
+        try:
+            strategy.set_semantic_context(semantic_mispricings)
+        except Exception:
+            logger.exception("Failed to inject semantic context — continuing.")
+
+    # Semantic engine 'disabled' short-circuit: if the strategy is
+    # semantic_mispricing and mode=='disabled', force HOLD for this tick
+    # by clearing the context.  This gives operators a runtime kill switch
+    # separate from the binary enabled flag (useful for A/B live tests).
+    if (
+        getattr(cfg, "semantic_engine_mode", "shadow") == "disabled"
+        and hasattr(strategy, "clear_semantic_context")
+    ):
+        strategy.clear_semantic_context()
 
     # 3. Evaluate strategy on each snapshot
     signals_generated = 0

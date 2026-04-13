@@ -183,6 +183,72 @@ class Config:
     order_mode: str = field(default_factory=lambda: _env("ORDER_MODE", "taker"))
     maker_fill_prob: float = field(default_factory=lambda: _env_float("MAKER_FILL_PROB", 0.7))
 
+    # -- Semantic Mispricing Engine (opt-in, default off) ---------------------
+    # A read-only observer that detects mispricings between a target market
+    # and a synthetic fair price derived from *related* markets (structural
+    # neg-risk siblings, near-equivalent questions, temporal checkpoints).
+    # When ``STRATEGY=semantic_mispricing`` the engine's output is also used
+    # as a trading strategy — otherwise it only populates the
+    # ``semantic_signals`` table for offline analysis.
+    #
+    # All thresholds default to values that are strict enough to prevent
+    # textual false positives from generating trades.  Loosen with care.
+    semantic_engine_enabled: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_ENGINE_ENABLED", False)
+    )
+    # ``disabled`` → no-op.  ``shadow`` → scan + persist + record SHADOW_*
+    # decisions if STRATEGY=semantic_mispricing.  ``live`` → the strategy
+    # routes signals through the normal risk + execution path (still paper
+    # unless ALLOW_LIVE_TRADING=true globally).
+    semantic_engine_mode: str = field(
+        default_factory=lambda: _env("SEMANTIC_ENGINE_MODE", "shadow")
+    )
+    semantic_min_relation_confidence: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MIN_RELATION_CONFIDENCE", 0.65)
+    )
+    semantic_min_net_edge: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MIN_NET_EDGE", 0.02)
+    )
+    semantic_min_signal_score: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MIN_SIGNAL_SCORE", 0.60)
+    )
+    semantic_max_spread: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MAX_SPREAD", 0.05)
+    )
+    semantic_min_liquidity: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MIN_LIQUIDITY", 500.0)
+    )
+    semantic_max_related_markets: int = field(
+        default_factory=lambda: _env_int("SEMANTIC_MAX_RELATED_MARKETS", 8)
+    )
+    semantic_min_sibling_liquidity: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_MIN_SIBLING_LIQUIDITY", 100.0)
+    )
+    semantic_safety_margin_bps: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_SAFETY_MARGIN_BPS", 50.0)
+    )
+    # Execution preference: "taker" | "maker" | "auto".  "auto" lets the
+    # scorer pick maker when a passive post is economically better given
+    # the fee schedule, but still flags the intent in the features dict.
+    semantic_execution_preference: str = field(
+        default_factory=lambda: _env("SEMANTIC_EXECUTION_PREFERENCE", "auto")
+    )
+    semantic_use_neg_risk_links: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_USE_NEG_RISK_LINKS", True)
+    )
+    semantic_use_temporal_links: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_USE_TEMPORAL_LINKS", True)
+    )
+    semantic_use_inverse_links: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_USE_INVERSE_LINKS", True)
+    )
+    semantic_use_textual_links: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_USE_TEXTUAL_LINKS", True)
+    )
+    semantic_calibration_overlay_enabled: bool = field(
+        default_factory=lambda: _env_bool("SEMANTIC_CALIBRATION_OVERLAY", False)
+    )
+
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
