@@ -15,9 +15,14 @@
 | `STRATEGY` | `simple_momentum` | Conservative default strategy |
 | `NET_PAIRED_LEGS` | `false` | Count distinct tokens as slots (old behaviour) |
 | `MAX_BOOK_DEPTH_FRACTION` | `0` | Liquidity cap only (old behaviour) |
+| `LOG_MAX_BYTES` | `10485760` (10 MB) | Rotate `bot.log` past this size |
+| `LOG_BACKUP_COUNT` | `5` | Rotated `bot.log.1..N` retained |
+| `DB_BACKUP_DIR` | *(empty)* | Set to enable periodic online SQLite backups |
+| `DB_BACKUP_INTERVAL_HOURS` | `24` | How often to snapshot |
+| `DB_BACKUP_KEEP` | `7` | How many snapshots to retain |
 
 When in doubt, change nothing. The defaults have been validated against
-the full 373-test suite and the one rule from `CLAUDE.md` is never to
+the full test suite and the one rule from `CLAUDE.md` is never to
 rebuild from scratch.
 
 ---

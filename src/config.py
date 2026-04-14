@@ -292,6 +292,28 @@ class Config:
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: _env("LOG_FILE", "bot.log"))
+    # Rotate bot.log once it grows past this.  Default 10 MB keeps the
+    # disk footprint bounded (at most (backup+1)*max_bytes ≈ 60 MB with
+    # defaults).  Set to 0 to disable rotation (legacy behaviour).
+    log_max_bytes: int = field(
+        default_factory=lambda: _env_int("LOG_MAX_BYTES", 10 * 1024 * 1024)
+    )
+    log_backup_count: int = field(
+        default_factory=lambda: _env_int("LOG_BACKUP_COUNT", 5)
+    )
+
+    # -- DB backups (opt-in, but strongly recommended) ------------------------
+    # Empty string disables.  When set, the bot takes an online SQLite
+    # backup every ``db_backup_interval_hours`` and keeps the N most
+    # recent files.  Uses ``sqlite3.Connection.backup`` (page-level,
+    # concurrent-write-safe) — *not* a plain file copy.
+    db_backup_dir: str = field(default_factory=lambda: _env("DB_BACKUP_DIR", ""))
+    db_backup_interval_hours: float = field(
+        default_factory=lambda: _env_float("DB_BACKUP_INTERVAL_HOURS", 24.0)
+    )
+    db_backup_keep: int = field(
+        default_factory=lambda: _env_int("DB_BACKUP_KEEP", 7)
+    )
 
     # -- Storage ---------------------------------------------------------------
     sqlite_db_path: str = field(default_factory=lambda: _env("SQLITE_DB_PATH", "polymarket_bot.db"))

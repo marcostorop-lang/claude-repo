@@ -161,12 +161,44 @@ def run_loop(cfg: Config) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # Scheduler state for DB online-backups — last epoch we ran one.
+    # 0.0 → first check runs immediately.  Enforced via
+    # ``src.storage.backup.should_run`` so disabled (interval<=0 or
+    # empty dir) is a true no-op.
+    last_db_backup = 0.0
+
     tick_count = 0
     while not _shutdown:
         # Kill switch file check
         if os.path.exists(cfg.kill_switch_file):
             logger.warning("KILL SWITCH FILE detected (%s) — shutting down.", cfg.kill_switch_file)
             break
+
+        # Periodic SQLite online backup.  Cheap: a few-MB DB copies in
+        # <100 ms under a read lock that doesn't block writes.  Runs
+        # only when ``DB_BACKUP_DIR`` is set.
+        if cfg.db_backup_dir:
+            try:
+                from src.storage.backup import should_run as _bk_should_run
+                from src.storage.backup import snapshot as _bk_snapshot
+                if _bk_should_run(last_db_backup, cfg.db_backup_interval_hours):
+                    out = _bk_snapshot(
+                        cfg.sqlite_db_path, cfg.db_backup_dir,
+                        keep=cfg.db_backup_keep,
+                    )
+                    if out is not None:
+                        last_db_backup = time.time()
+                        if metrics.enabled:
+                            metrics.emit("db_backup", path=str(out))
+                    else:
+                        if alerts is not None:
+                            alerts.warn(
+                                "db backup failed",
+                                dir=cfg.db_backup_dir,
+                                source=cfg.sqlite_db_path,
+                            )
+            except Exception:
+                logger.exception("DB backup path crashed — continuing.")
 
         # Circuit breaker check
         if risk_mgr.is_circuit_breaker_active:
@@ -956,7 +988,10 @@ def cli():
 def cmd_run_bot():
     """Start the main trading loop."""
     cfg = Config()
-    setup_logging(cfg.log_level, cfg.log_file)
+    setup_logging(
+        cfg.log_level, cfg.log_file,
+        max_bytes=cfg.log_max_bytes, backup_count=cfg.log_backup_count,
+    )
     run_loop(cfg)
 
 
@@ -969,7 +1004,10 @@ def cmd_backfill():
     of them blocks for a long time and is unnecessary for paper trading).
     """
     cfg = Config()
-    setup_logging(cfg.log_level, cfg.log_file)
+    setup_logging(
+        cfg.log_level, cfg.log_file,
+        max_bytes=cfg.log_max_bytes, backup_count=cfg.log_backup_count,
+    )
     client = PolymarketClient(cfg)
     store = SQLiteStore(cfg.sqlite_db_path)
 
