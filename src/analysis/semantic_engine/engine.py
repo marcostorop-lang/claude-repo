@@ -27,8 +27,9 @@ from src.analysis.semantic_engine.scoring import (
     ScoringConfig,
     score_mispricing,
 )
+from src.analysis.semantic_engine.smoothing import EMASmoother
 from src.analysis.semantic_engine.synthetic_price import estimate_fair_price
-from src.analysis.semantic_engine.types import SemanticMispricing
+from src.analysis.semantic_engine.types import SemanticMispricing, SyntheticPrice
 from src.polymarket.market_data import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,8 @@ def find_semantic_mispricings(
     max_related_per_target: int = 8,
     min_sibling_liquidity: float = 0.0,
     prefer_maker: bool = False,
+    smoother: EMASmoother | None = None,
+    tick_ts: str = "",
 ) -> list[SemanticMispricing]:
     """Scan ``snapshots`` and return actionable mispricings.
 
@@ -100,6 +103,28 @@ def find_semantic_mispricings(
         )
         if synth is None:
             continue
+
+        # Cross-tick EMA smoothing (opt-in): stabilises fair value against
+        # single-tick spikes from a stale sibling.  Only the point estimate
+        # is smoothed — the band is widened to reflect the added inertia
+        # after the first few samples (otherwise a fast real move would
+        # get masked).  Range-only estimates skip smoothing entirely.
+        if smoother is not None and not synth.is_range_only:
+            smoothed_point = smoother.update(target.token_id, synth.point, tick_ts)
+            # After the smoother has enough samples, a larger band reflects
+            # that our "current" fair is an average, not a spot.
+            n = smoother.samples(target.token_id)
+            band_widen = 0.005 if n >= 3 else 0.0
+            synth = SyntheticPrice(
+                point=round(smoothed_point, 6),
+                lower=round(min(synth.lower, smoothed_point) - band_widen, 6),
+                upper=round(max(synth.upper, smoothed_point) + band_widen, 6),
+                confidence=synth.confidence,
+                method=synth.method,
+                contributors=synth.contributors,
+                n_contributors=synth.n_contributors,
+                is_range_only=False,
+            )
 
         # Need an executable book to quote edge against — if the snapshot
         # lacks bid/ask (uses midpoint only), approximate from price±spread/2.
@@ -183,6 +208,7 @@ def scan_and_record(
     max_related_per_target: int = 8,
     min_sibling_liquidity: float = 0.0,
     prefer_maker: bool = False,
+    smoother: EMASmoother | None = None,
 ) -> list[SemanticMispricing]:
     """Call :func:`find_semantic_mispricings` and persist to ``semantic_signals``.
 
@@ -199,6 +225,8 @@ def scan_and_record(
         max_related_per_target=max_related_per_target,
         min_sibling_liquidity=min_sibling_liquidity,
         prefer_maker=prefer_maker,
+        smoother=smoother,
+        tick_ts=timestamp,
     )
     if not mispricings:
         return mispricings

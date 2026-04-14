@@ -102,8 +102,57 @@ def run_loop(cfg: Config) -> None:
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)
 
+    # Optional cross-tick EMA smoother for the semantic engine's synthetic
+    # fair-price.  Persistent across ticks so the moving average actually
+    # accumulates state.  Default-off (alpha=0.0) so existing paper runs
+    # are unaffected byte-for-byte.
+    semantic_smoother = None
+    if (
+        getattr(cfg, "semantic_engine_enabled", False)
+        and getattr(cfg, "semantic_smoothing_alpha", 0.0) > 0.0
+    ):
+        try:
+            from src.analysis.semantic_engine.smoothing import EMASmoother
+            semantic_smoother = EMASmoother(
+                alpha=cfg.semantic_smoothing_alpha,
+                max_keys=cfg.semantic_smoothing_max_keys,
+            )
+            logger.info(
+                "Semantic EMA smoother enabled (alpha=%.2f, max_keys=%d).",
+                cfg.semantic_smoothing_alpha, cfg.semantic_smoothing_max_keys,
+            )
+        except Exception:
+            logger.exception("Failed to build EMA smoother — running without.")
+            semantic_smoother = None
+
+    # Alert manager: reads cfg.alert_* and wires up file + webhook sinks.
+    # If nothing is configured, it's a silent no-op so we can call it
+    # unconditionally below without adding latency in the default path.
+    try:
+        from src.utils.alerts import build_from_config
+        alerts = build_from_config(cfg)
+    except Exception:
+        logger.exception("Alert manager setup failed — running without alerts.")
+        alerts = None
+
+    # Structured JSON metrics writer — independent of the DB so external
+    # pipelines can aggregate without schema coupling.  No-op when
+    # ``METRICS_FILE`` is unset.
+    try:
+        from src.utils.metrics import build_from_config as build_metrics
+        metrics = build_metrics(cfg)
+    except Exception:
+        logger.exception("Metrics writer setup failed — running without metrics.")
+        from src.utils.metrics import MetricsWriter
+        metrics = MetricsWriter("")
+
     mode_label = "PAPER" if cfg.is_paper else ("LIVE" if cfg.is_live else "PAPER (live not enabled)")
     logger.info("=== Bot started | mode=%s | strategy=%s | poll=%ds ===", mode_label, strategy.name, cfg.poll_interval)
+    if alerts is not None and alerts.sinks:
+        alerts.info(
+            "bot started", mode=mode_label, strategy=strategy.name,
+            poll_seconds=cfg.poll_interval,
+        )
 
     problems = cfg.validate()
     for p in problems:
@@ -122,13 +171,30 @@ def run_loop(cfg: Config) -> None:
         # Circuit breaker check
         if risk_mgr.is_circuit_breaker_active:
             logger.warning("Circuit breaker active (daily loss $%.2f). Skipping tick, monitoring only.", abs(risk_mgr.daily_pnl))
+            if alerts is not None:
+                alerts.critical(
+                    "circuit breaker active",
+                    daily_loss_usd=round(abs(risk_mgr.daily_pnl), 2),
+                    max_daily_loss_usd=cfg.max_daily_loss,
+                )
             # Still check SL/TP on existing positions even when circuit breaker is active
             _check_exits_only(risk_mgr, executor, portfolio, store, client, cfg)
         else:
             try:
-                _tick(market_svc, strategy, risk_mgr, executor, portfolio, store, client, cfg)
-            except Exception:
+                _tick(
+                    market_svc, strategy, risk_mgr, executor, portfolio,
+                    store, client, cfg, semantic_smoother=semantic_smoother,
+                    metrics=metrics,
+                )
+            except Exception as exc:
                 logger.exception("Error in bot tick — will retry next cycle.")
+                if alerts is not None:
+                    alerts.warn(
+                        "tick error", error=type(exc).__name__, message=str(exc),
+                    )
+                if metrics.enabled:
+                    metrics.emit("tick_error", error=type(exc).__name__,
+                                 message=str(exc))
 
         tick_count += 1
         # Export bot state for dashboard every tick
@@ -286,6 +352,9 @@ def _tick(
     store: SQLiteStore,
     client: PolymarketClient,
     cfg: Config,
+    *,
+    semantic_smoother=None,
+    metrics=None,
 ) -> None:
     """One iteration of the bot loop."""
 
@@ -429,6 +498,7 @@ def _tick(
                 max_related_per_target=cfg.semantic_max_related_markets,
                 min_sibling_liquidity=cfg.semantic_min_sibling_liquidity,
                 prefer_maker=prefer_maker,
+                smoother=semantic_smoother,
             )
             if semantic_mispricings:
                 logger.info(
@@ -848,6 +918,28 @@ def _tick(
         )
     except Exception:
         logger.debug("Failed to insert tick stats.", exc_info=True)
+
+    # Mirror tick stats as a JSON line so external pipelines (Loki,
+    # Vector, etc.) can consume metrics without reaching into SQLite.
+    # No-op when ``metrics_file`` is unset.
+    if metrics is not None and getattr(metrics, "enabled", False):
+        metrics.emit(
+            "tick",
+            ts=tick_ts,
+            duration_s=round(tick_duration, 3),
+            markets_scanned=len(snapshots),
+            signals_generated=signals_generated,
+            risk_rejections=risk_rejections,
+            trades_executed=trades_executed,
+            open_positions=summary["open_positions"],
+            total_exposure=round(summary["total_exposure"], 2),
+            realised_pnl=round(summary["realised_pnl"], 4),
+            unrealised_pnl=round(summary["unrealised_pnl"], 4),
+            daily_pnl=round(risk_mgr.daily_pnl, 4),
+            skip_warmup=skip_insufficient_history,
+            skip_no_price=skip_no_price,
+            skip_hold=skip_hold,
+        )
 
 
 # ---------------------------------------------------------------------------

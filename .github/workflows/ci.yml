@@ -1,0 +1,54 @@
+name: CI
+
+# Runs the test suite on push / PR.  Keeping the workflow short and
+# deterministic is the point — the bot itself never starts here (no
+# credentials, no network), we just prove the unit + integration tests
+# on the CPython versions we support pass.
+#
+# If adding a check: it must be deterministic and network-free.  Do NOT
+# add live Polymarket calls — CI must never risk real orders or burn
+# rate-limit budget.
+
+on:
+  push:
+    branches:
+      - main
+      - "claude/**"
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # FastAPI/TestClient is imported by dashboard tests via
+          # pytest.importorskip; install it so those tests actually run.
+          pip install fastapi httpx
+
+      - name: Run test suite
+        env:
+          # Explicitly pin the safest defaults — a rogue test must not
+          # be able to spoof a live-trading config.
+          TRADING_MODE: paper
+          ALLOW_LIVE_TRADING: "false"
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -m pytest -q --tb=short

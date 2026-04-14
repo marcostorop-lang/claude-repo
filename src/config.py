@@ -275,6 +275,18 @@ class Config:
     semantic_calibration_overlay_enabled: bool = field(
         default_factory=lambda: _env_bool("SEMANTIC_CALIBRATION_OVERLAY", False)
     )
+    # Cross-tick EMA smoothing for the synthetic fair-price.  Alpha in
+    # (0, 1] activates smoothing; 0.0 (default) disables it and the engine
+    # uses the raw per-tick synthetic.  A typical value is 0.3 — moderate
+    # trailing average that dampens single-tick stale-sibling spikes
+    # without masking genuine moves.  See
+    # src/analysis/semantic_engine/smoothing.py for the rationale.
+    semantic_smoothing_alpha: float = field(
+        default_factory=lambda: _env_float("SEMANTIC_SMOOTHING_ALPHA", 0.0)
+    )
+    semantic_smoothing_max_keys: int = field(
+        default_factory=lambda: _env_int("SEMANTIC_SMOOTHING_MAX_KEYS", 2048)
+    )
 
     # -- Bot loop --------------------------------------------------------------
     poll_interval: int = field(default_factory=lambda: _env_int("POLL_INTERVAL_SECONDS", 60))
@@ -289,6 +301,26 @@ class Config:
 
     # -- Kill switch -----------------------------------------------------------
     kill_switch_file: str = field(default_factory=lambda: _env("KILL_SWITCH_FILE", "KILL_SWITCH"))
+
+    # -- Alerting (opt-in) -----------------------------------------------------
+    # Empty strings disable each sink.  See ``src/utils/alerts.py``.  The
+    # file sink is local JSONL (audit log); the webhook sink is Slack /
+    # Discord compatible.  Both default to off so paper runs behave
+    # exactly as before.
+    alert_log_file: str = field(default_factory=lambda: _env("ALERT_LOG_FILE", ""))
+    alert_webhook_url: str = field(default_factory=lambda: _env("ALERT_WEBHOOK_URL", ""))
+    alert_dedupe_seconds: float = field(
+        default_factory=lambda: _env_float("ALERT_DEDUPE_SECONDS", 300.0)
+    )
+    alert_max_per_minute: int = field(
+        default_factory=lambda: _env_int("ALERT_MAX_PER_MINUTE", 20)
+    )
+
+    # -- Metrics (opt-in JSONL sink) -------------------------------------------
+    # Empty string disables.  When set, each tick writes one JSON record
+    # to the file; external log shippers can tail it without opening the
+    # SQLite DB.  See ``src/utils/metrics.py``.
+    metrics_file: str = field(default_factory=lambda: _env("METRICS_FILE", ""))
 
     # -- Derived helpers -------------------------------------------------------
     @property
