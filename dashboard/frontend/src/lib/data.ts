@@ -231,3 +231,301 @@ export function getConfig() {
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// Semantic mispricing engine observability
+// ---------------------------------------------------------------------------
+//
+// Mirrors the /api/semantic/{signals,summary,calibration} FastAPI endpoints
+// as direct SQLite reads so the Next.js server components can render the
+// tile without a second HTTP hop.  The algorithms here MUST stay in sync
+// with ``src/analysis/semantic_engine/calibration.py`` — the canonical
+// implementation.  If a test catches drift, update both sides in lockstep.
+
+/** Checks whether the semantic_signals table exists — it's created only after
+ * the first bot run with SEMANTIC_ENGINE_ENABLED=true, so on a fresh DB
+ * this returns false and the UI can render an empty-state tile. */
+export function hasSemanticTable(): boolean {
+  try {
+    const row = queryOne(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='semantic_signals'"
+    );
+    return row !== undefined && row !== null;
+  } catch {
+    return false;
+  }
+}
+
+export type SemanticSummaryMethod = {
+  method: string;
+  count: number;
+  avg_net_edge: number;
+  avg_score: number;
+  avg_confidence: number;
+};
+
+export type SemanticSummary = {
+  table_exists: boolean;
+  total: number;
+  window_days: number;
+  avg_net_edge: number;
+  avg_score: number;
+  by_side: { BUY: number; SELL: number };
+  by_method: SemanticSummaryMethod[];
+};
+
+export function getSemanticSummary(days = 7): SemanticSummary {
+  const empty: SemanticSummary = {
+    table_exists: false, total: 0, window_days: days,
+    avg_net_edge: 0, avg_score: 0,
+    by_side: { BUY: 0, SELL: 0 }, by_method: [],
+  };
+  if (!hasSemanticTable()) return empty;
+
+  const cutoff = `datetime('now', '-${Math.max(1, Math.floor(days))} days')`;
+  const totals = queryOne(
+    `SELECT COUNT(*) as n, AVG(net_edge) as avg_e, AVG(score) as avg_s ` +
+    `FROM semantic_signals WHERE timestamp >= ${cutoff}`
+  );
+  const sideRows = query(
+    `SELECT side, COUNT(*) as n FROM semantic_signals ` +
+    `WHERE timestamp >= ${cutoff} GROUP BY side`
+  );
+  const methodRows = query(
+    `SELECT synthetic_method as method, COUNT(*) as n, ` +
+    `AVG(net_edge) as avg_e, AVG(score) as avg_s, ` +
+    `AVG(synthetic_confidence) as avg_c ` +
+    `FROM semantic_signals WHERE timestamp >= ${cutoff} ` +
+    `GROUP BY synthetic_method ORDER BY n DESC`
+  );
+
+  const by_side = { BUY: 0, SELL: 0 };
+  for (const r of sideRows) {
+    const s = r.side as string;
+    if (s === "BUY" || s === "SELL") by_side[s] = r.n as number;
+  }
+
+  return {
+    table_exists: true,
+    total: (totals?.n as number) || 0,
+    window_days: days,
+    avg_net_edge: +((totals?.avg_e as number) || 0).toFixed(6),
+    avg_score: +((totals?.avg_s as number) || 0).toFixed(4),
+    by_side,
+    by_method: methodRows.map((r) => ({
+      method: (r.method as string) || "unknown",
+      count: r.n as number,
+      avg_net_edge: +(((r.avg_e as number) || 0)).toFixed(6),
+      avg_score: +(((r.avg_s as number) || 0)).toFixed(4),
+      avg_confidence: +(((r.avg_c as number) || 0)).toFixed(4),
+    })),
+  };
+}
+
+export type SemanticSignal = {
+  id: number;
+  timestamp: string;
+  token_id: string;
+  question: string;
+  category: string;
+  side: "BUY" | "SELL";
+  net_edge: number;
+  score: number;
+  synthetic_method: string;
+  synthetic_fair: number;
+  synthetic_confidence: number;
+  midpoint: number;
+  spread: number;
+  mode: string;
+};
+
+export function getSemanticSignals(limit = 25, mode?: "shadow" | "live"): {
+  table_exists: boolean;
+  signals: SemanticSignal[];
+} {
+  if (!hasSemanticTable()) return { table_exists: false, signals: [] };
+  const where = mode ? "WHERE mode = ?" : "";
+  const params: unknown[] = mode ? [mode, limit] : [limit];
+  const rows = query(
+    `SELECT id, timestamp, token_id, question, category, side, ` +
+    `net_edge, score, synthetic_method, synthetic_fair, synthetic_confidence, ` +
+    `midpoint, spread, mode FROM semantic_signals ${where} ` +
+    `ORDER BY id DESC LIMIT ?`,
+    params
+  );
+  const signals = rows.map((r) => ({
+    id: r.id as number,
+    timestamp: r.timestamp as string,
+    token_id: r.token_id as string,
+    question: (r.question as string) || "",
+    category: (r.category as string) || "",
+    side: r.side as "BUY" | "SELL",
+    net_edge: r.net_edge as number,
+    score: r.score as number,
+    synthetic_method: (r.synthetic_method as string) || "unknown",
+    synthetic_fair: r.synthetic_fair as number,
+    synthetic_confidence: r.synthetic_confidence as number,
+    midpoint: r.midpoint as number,
+    spread: r.spread as number,
+    mode: (r.mode as string) || "shadow",
+  }));
+  return { table_exists: true, signals };
+}
+
+export type MethodCalibration = {
+  method: string;
+  n_signals: number;
+  n_matched: number;
+  avg_detected_edge: number;
+  avg_realised_edge: number;
+  realisation_ratio: number | null;
+  win_rate: number;
+};
+
+export type SemanticCalibration = {
+  table_exists: boolean;
+  n_signals: number;
+  n_matched: number;
+  window_days: number;
+  per_method: MethodCalibration[];
+  warnings: string[];
+};
+
+/** Match each semantic BUY signal to the next BUY→SELL round-trip on
+ * the same token within ``matchWindowHours``.  Mirrors the FIFO logic in
+ * src/analysis/semantic_engine/calibration.py:_pair_buys_with_exits. */
+export function getSemanticCalibration(
+  days = 30,
+  matchWindowHours = 24.0,
+): SemanticCalibration {
+  const empty: SemanticCalibration = {
+    table_exists: false, n_signals: 0, n_matched: 0,
+    window_days: days, per_method: [], warnings: [],
+  };
+  if (!hasSemanticTable()) return { ...empty, warnings: ["semantic_signals_table_missing"] };
+
+  const cutoff = `datetime('now', '-${Math.max(1, Math.floor(days))} days')`;
+  const signals = query(
+    `SELECT timestamp, token_id, synthetic_method, net_edge, side ` +
+    `FROM semantic_signals WHERE timestamp >= ${cutoff} ORDER BY timestamp ASC`
+  );
+  const trades = query(
+    `SELECT timestamp, token_id, side, price, size ` +
+    `FROM trades WHERE strategy = 'semantic_mispricing' ` +
+    `AND timestamp >= ${cutoff} ORDER BY timestamp ASC`
+  );
+  if (signals.length === 0) {
+    return { ...empty, table_exists: true };
+  }
+
+  // Build a per-token FIFO of BUY→next-SELL round-trips so we can match
+  // each BUY signal to the one it caused (if any).  A BUY signal with no
+  // subsequent BUY trade within the window is "unmatched" (reported but
+  // not aggregated into the ratio).
+  const tradesByToken: Record<string, Array<Record<string, unknown>>> = {};
+  for (const t of trades) {
+    const k = t.token_id as string;
+    (tradesByToken[k] = tradesByToken[k] || []).push(t);
+  }
+
+  // Simple pairing: for each BUY trade, find the first SELL on the same
+  // token that happened AFTER it.  O(n) with two pointers.
+  const pairs: Record<string, Array<{ buyTs: string; buyPx: number; sellPx: number }>> = {};
+  for (const k of Object.keys(tradesByToken)) {
+    const list = tradesByToken[k];
+    const buys = list.filter((t) => t.side === "BUY");
+    const sells = list.filter((t) => t.side === "SELL");
+    const out: Array<{ buyTs: string; buyPx: number; sellPx: number }> = [];
+    let si = 0;
+    for (const b of buys) {
+      while (si < sells.length && (sells[si].timestamp as string) <= (b.timestamp as string)) {
+        si++;
+      }
+      if (si >= sells.length) break;
+      out.push({
+        buyTs: b.timestamp as string,
+        buyPx: b.price as number,
+        sellPx: sells[si].price as number,
+      });
+      si++;
+    }
+    pairs[k] = out;
+  }
+
+  // For each signal, find a pair whose buyTs is within windowMs after the
+  // signal timestamp.  Once matched, the pair is consumed (to avoid two
+  // signals claiming the same trade).
+  const windowMs = matchWindowHours * 3600 * 1000;
+  type Bucket = {
+    n_signals: number;
+    n_matched: number;
+    sum_detected: number;
+    sum_realised: number;
+    wins: number;
+  };
+  const buckets: Record<string, Bucket> = {};
+  let matchedTotal = 0;
+  for (const sig of signals) {
+    const method = (sig.synthetic_method as string) || "unknown";
+    const b = (buckets[method] = buckets[method] || {
+      n_signals: 0, n_matched: 0, sum_detected: 0, sum_realised: 0, wins: 0,
+    });
+    b.n_signals += 1;
+    if (sig.side !== "BUY") continue; // calibration only covers BUY side for now
+
+    const sigTs = Date.parse(sig.timestamp as string);
+    const tok = sig.token_id as string;
+    const tokenPairs = pairs[tok] || [];
+    let matchIdx = -1;
+    for (let i = 0; i < tokenPairs.length; i++) {
+      const buyTs = Date.parse(tokenPairs[i].buyTs);
+      if (Number.isNaN(buyTs)) continue;
+      const delta = buyTs - sigTs;
+      if (delta < 0) continue;
+      if (delta > windowMs) break;
+      matchIdx = i;
+      break;
+    }
+    if (matchIdx < 0) continue;
+    const p = tokenPairs.splice(matchIdx, 1)[0];
+    const detected = sig.net_edge as number;
+    const realised = (p.sellPx - p.buyPx) / Math.max(p.buyPx, 1e-9);
+    b.n_matched += 1;
+    b.sum_detected += detected;
+    b.sum_realised += realised;
+    if (realised > 0) b.wins += 1;
+    matchedTotal += 1;
+  }
+
+  const per_method: MethodCalibration[] = Object.entries(buckets).map(([method, b]) => {
+    const avgDet = b.n_matched ? b.sum_detected / b.n_matched : 0;
+    const avgReal = b.n_matched ? b.sum_realised / b.n_matched : 0;
+    const ratio = Math.abs(avgDet) > 1e-6 ? +(avgReal / avgDet).toFixed(4) : null;
+    return {
+      method,
+      n_signals: b.n_signals,
+      n_matched: b.n_matched,
+      avg_detected_edge: +avgDet.toFixed(6),
+      avg_realised_edge: +avgReal.toFixed(6),
+      realisation_ratio: ratio,
+      win_rate: b.n_matched ? +(b.wins / b.n_matched).toFixed(4) : 0,
+    };
+  }).sort((a, b) => b.n_signals - a.n_signals);
+
+  const warnings: string[] = [];
+  if (signals.length > 0 && matchedTotal === 0) {
+    warnings.push("no_signals_matched_trades");
+  }
+  if (signals.length > 0 && signals.length < 20) {
+    warnings.push("small_sample_size");
+  }
+
+  return {
+    table_exists: true,
+    n_signals: signals.length,
+    n_matched: matchedTotal,
+    window_days: days,
+    per_method,
+    warnings,
+  };
+}

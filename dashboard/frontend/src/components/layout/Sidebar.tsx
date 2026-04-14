@@ -9,6 +9,7 @@ import {
   Crosshair,
   Store,
   Brain,
+  Telescope,
   ScrollText,
   Settings,
 } from "lucide-react";
@@ -20,6 +21,7 @@ const NAV = [
   { href: "/positions", label: "Positions", icon: Crosshair },
   { href: "/markets", label: "Markets", icon: Store },
   { href: "/strategies", label: "Strategies", icon: Brain },
+  { href: "/semantic", label: "Semantic", icon: Telescope },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/config", label: "Config", icon: Settings },
 ];
