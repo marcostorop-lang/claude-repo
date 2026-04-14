@@ -438,6 +438,68 @@ class SQLiteStore:
         except sqlite3.OperationalError:
             return []
 
+    def semantic_signals_summary(self, limit: int = 500) -> dict:
+        """Aggregate KPIs for the most recent ``limit`` semantic signals.
+
+        Read-only, safe to call from the export path or dashboard hooks. If
+        the table is missing (old DB) or empty, returns the zero-count shape
+        so callers don't need to special-case.
+        """
+        empty = {
+            "count": 0,
+            "by_side": {"BUY": 0, "SELL": 0},
+            "by_method": {},
+            "by_mode": {},
+            "avg_score": 0.0,
+            "avg_net_edge": 0.0,
+            "avg_synthetic_confidence": 0.0,
+            "last_timestamp": None,
+        }
+        try:
+            cur = self._conn.execute(
+                "SELECT side, synthetic_method, mode, score, net_edge, "
+                "synthetic_confidence, timestamp "
+                "FROM semantic_signals ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = cur.fetchall()
+        except sqlite3.OperationalError:
+            return empty
+        if not rows:
+            return empty
+        by_side = {"BUY": 0, "SELL": 0}
+        by_method: dict[str, int] = {}
+        by_mode: dict[str, int] = {}
+        sum_score = 0.0
+        sum_edge = 0.0
+        sum_conf = 0.0
+        last_ts = None
+        for row in rows:
+            side = row["side"] or ""
+            if side in by_side:
+                by_side[side] += 1
+            method = row["synthetic_method"] or "unknown"
+            by_method[method] = by_method.get(method, 0) + 1
+            mode = row["mode"] or "shadow"
+            by_mode[mode] = by_mode.get(mode, 0) + 1
+            sum_score += float(row["score"] or 0.0)
+            sum_edge += float(row["net_edge"] or 0.0)
+            sum_conf += float(row["synthetic_confidence"] or 0.0)
+            ts = row["timestamp"]
+            if ts and (last_ts is None or ts > last_ts):
+                last_ts = ts
+        n = len(rows)
+        return {
+            "count": n,
+            "by_side": by_side,
+            "by_method": by_method,
+            "by_mode": by_mode,
+            "avg_score": round(sum_score / n, 4),
+            "avg_net_edge": round(sum_edge / n, 6),
+            "avg_synthetic_confidence": round(sum_conf / n, 4),
+            "last_timestamp": last_ts,
+        }
+
     def insert_tick_stats(
         self,
         timestamp: str,

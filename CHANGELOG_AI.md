@@ -134,3 +134,56 @@ All meaningful changes made by the AI Continuous Improvement process.
 
 ### Test Results
 - 68 total tests: ALL PASSING (28 original + 24 from phase 1 + 16 new)
+
+---
+
+## 2026-04-14 — Semantic engine dashboard visibility
+
+### Code Changes
+
+#### 18. `SQLiteStore.semantic_signals_summary()` (storage/sqlite_store.py)
+- **What**: Read-only aggregate over the `semantic_signals` table: total
+  count, BUY/SELL split, counts by `synthetic_method`, counts by `mode`,
+  average score / net edge / synthetic confidence, last timestamp. Survives
+  a missing table (returns zero-shape instead of raising).
+- **Why**: The engine persists every detection but nothing read it back.
+  The docs explicitly required inspecting method mix / score / net edge
+  distribution before promoting to live mode — there was no way to do
+  that without hand-written SQL.
+- **Risk**: None — purely additive read method.
+- **Validation**: 4 new tests covering empty DB, aggregation, limit
+  respect, and missing-table fallback.
+
+#### 19. Semantic summary exported in `bot_state.json` (main.py)
+- **What**: `_export_bot_state` now accepts the `SQLiteStore` and, when the
+  engine is enabled OR when any signals already exist in the DB, writes a
+  `semantic` block with `config` (enabled / mode / thresholds) and
+  `summary` (the aggregate from above). Errors inside the summary call are
+  swallowed so the dashboard export never breaks the tick.
+- **Why**: Dashboard must reflect backend truth — the operator should see
+  the live thresholds and the effect of the shadow observer.
+- **Risk**: Low — store is passed as an optional arg; callers without the
+  store get the pre-existing behaviour.
+- **Validation**: Existing no-regression tick test still passes.
+
+#### 20. Dashboard `Semantic Mispricing Engine` section (generate_dashboard.js)
+- **What**: New dashboard section — hidden when there are no signals and
+  the engine is disabled — showing engine state, detection counters,
+  average quality metrics, synthetic-method mix, and a 20-row table of
+  recent detections with bid/ask/fair/edge/score/confidence/mode. Nav
+  entry also gated on the same condition.
+- **Why**: Gives the operator an at-a-glance view of shadow-observer
+  output before any decision to promote the engine to live. Closes the
+  gap between "detections are persisted" and "detections are reviewable".
+- **Risk**: Low — section is gated on `semanticStats || semanticCfg`; old
+  DBs render identically to before.
+- **Validation**: `node -c generate_dashboard.js` passes; visual
+  inspection planned next run.
+
+### New Tests (4 tests)
+- test_sqlite_store.py::TestSemanticSignalsSummary:
+  empty shape, aggregation across sides/methods/modes, limit respected,
+  missing-table fallback.
+
+### Test Results
+- 375 total tests: ALL PASSING (371 previous + 4 new)

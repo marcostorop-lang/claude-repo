@@ -318,6 +318,54 @@ if (tableExists("calibration")) {
   }
 }
 
+// === SEMANTIC MISPRICING (observer) ===
+// Shadow-log: summarises recent detections so operators can evaluate signal
+// quality before promoting the engine to live mode.  Zero rows is normal
+// when the engine is disabled.
+let semanticStats = null;
+let semanticRecent = [];
+if (tableExists("semantic_signals")) {
+  try {
+    const rs = query(
+      "SELECT side, synthetic_method, mode, score, net_edge, synthetic_confidence, timestamp " +
+      "FROM semantic_signals ORDER BY id DESC LIMIT 500"
+    );
+    if (rs.length > 0) {
+      const bySide = { BUY: 0, SELL: 0 };
+      const byMethod = {};
+      const byMode = {};
+      let sumScore = 0, sumEdge = 0, sumConf = 0;
+      let lastTs = null;
+      for (const r of rs) {
+        if (r.side in bySide) bySide[r.side] += 1;
+        const m = r.synthetic_method || "unknown";
+        byMethod[m] = (byMethod[m] || 0) + 1;
+        const md = r.mode || "shadow";
+        byMode[md] = (byMode[md] || 0) + 1;
+        sumScore += Number(r.score || 0);
+        sumEdge += Number(r.net_edge || 0);
+        sumConf += Number(r.synthetic_confidence || 0);
+        if (r.timestamp && (!lastTs || r.timestamp > lastTs)) lastTs = r.timestamp;
+      }
+      semanticStats = {
+        count: rs.length,
+        bySide, byMethod, byMode,
+        avgScore: sumScore / rs.length,
+        avgNetEdge: sumEdge / rs.length,
+        avgSyntheticConfidence: sumConf / rs.length,
+        lastTimestamp: lastTs,
+      };
+    }
+    // Last ~20 detections for an inspection table
+    semanticRecent = query(
+      "SELECT timestamp, side, question, category, synthetic_method, " +
+      "best_bid, best_ask, synthetic_fair, net_edge, score, synthetic_confidence, mode " +
+      "FROM semantic_signals ORDER BY id DESC LIMIT 20"
+    );
+  } catch (_) { /* non-fatal */ }
+}
+const semanticCfg = botState && botState.semantic ? botState.semantic.config : null;
+
 // === BUILD HTML ===
 const pnlColor = o.total_pnl >= 0 ? "#22c55e" : "#ef4444";
 const pnlSign = o.total_pnl >= 0 ? "+" : "";
@@ -465,6 +513,7 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
     <a href="#strategies">Strategies</a>
     <a href="#risk">Risk</a>
     <a href="#calibration">Calibration</a>
+    ${semanticStats || semanticCfg ? '<a href="#semantic">Semantic</a>' : ''}
     <a href="#config">Config</a>
   </nav>
   <div class="ver">Polymarket Bot v1.0</div>
@@ -739,6 +788,75 @@ ${calibrationBuckets.length > 0 ? `
 </div>
 <div class="divider"></div>
 `}
+
+${semanticStats || semanticCfg ? `
+<div class="section" id="semantic">
+  <h2>Semantic Mispricing Engine <span style="font-size:11px;color:#6b7280;font-weight:400">(observer / shadow)</span></h2>
+  <div class="grid2">
+    <div class="card">
+      <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Engine State</h3>
+      <div class="config-row"><span class="key">Enabled</span><span class="val" style="color:${semanticCfg && semanticCfg.enabled ? '#22c55e' : '#6b7280'}">${semanticCfg ? (semanticCfg.enabled ? 'YES' : 'NO') : '-'}</span></div>
+      <div class="config-row"><span class="key">Mode</span><span class="val">${semanticCfg ? semanticCfg.mode : '-'}</span></div>
+      <div class="config-row"><span class="key">Min Net Edge</span><span class="val">${semanticCfg && semanticCfg.min_net_edge != null ? semanticCfg.min_net_edge : '-'}</span></div>
+      <div class="config-row"><span class="key">Min Signal Score</span><span class="val">${semanticCfg && semanticCfg.min_signal_score != null ? semanticCfg.min_signal_score : '-'}</span></div>
+      <div class="config-row"><span class="key">Min Relation Conf.</span><span class="val">${semanticCfg && semanticCfg.min_relation_confidence != null ? semanticCfg.min_relation_confidence : '-'}</span></div>
+      <div class="config-row"><span class="key">Last detection</span><span class="val mono" style="font-size:10px">${semanticStats && semanticStats.lastTimestamp ? semanticStats.lastTimestamp : '-'}</span></div>
+    </div>
+    <div class="card">
+      <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Detections (last ${semanticStats ? semanticStats.count : 0})</h3>
+      <div class="config-row"><span class="key">Total</span><span class="val mono">${semanticStats ? semanticStats.count : 0}</span></div>
+      <div class="config-row"><span class="key">BUY / SELL</span><span class="val mono">${semanticStats ? semanticStats.bySide.BUY : 0} / ${semanticStats ? semanticStats.bySide.SELL : 0}</span></div>
+      <div class="config-row"><span class="key">Avg Score</span><span class="val mono">${semanticStats ? semanticStats.avgScore.toFixed(3) : '-'}</span></div>
+      <div class="config-row"><span class="key">Avg Net Edge</span><span class="val mono">${semanticStats ? (semanticStats.avgNetEdge * 100).toFixed(2) + '¢' : '-'}</span></div>
+      <div class="config-row"><span class="key">Avg Synth. Conf.</span><span class="val mono">${semanticStats ? semanticStats.avgSyntheticConfidence.toFixed(3) : '-'}</span></div>
+      <div class="config-row"><span class="key">Modes</span><span class="val mono" style="font-size:11px">${semanticStats ? Object.entries(semanticStats.byMode).map(([k, v]) => k + ':' + v).join(' · ') : '-'}</span></div>
+    </div>
+  </div>
+  ${semanticStats && Object.keys(semanticStats.byMethod).length > 0 ? `
+  <div class="card" style="margin-top:12px">
+    <h3 style="border-bottom:1px solid #2a3040;padding-bottom:8px">Synthetic Method Mix</h3>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px">
+      ${Object.entries(semanticStats.byMethod).sort((a, b) => b[1] - a[1]).map(([k, v]) => {
+        const pct = (v / semanticStats.count * 100).toFixed(0);
+        return `<div style="flex:1;min-width:150px">
+          <div style="font-size:11px;color:#9ca3af">${k}</div>
+          <div style="font-size:18px;font-weight:600;color:#e5e7eb">${v} <span style="font-size:11px;color:#6b7280">(${pct}%)</span></div>
+        </div>`;
+      }).join('')}
+    </div>
+  </div>` : ''}
+  ${semanticRecent.length > 0 ? `
+  <div class="card overflow-x" style="margin-top:12px;padding:0">
+    <table>
+      <thead><tr>
+        <th>Time</th><th>Side</th><th>Market</th><th>Method</th>
+        <th class="text-right">Bid</th><th class="text-right">Ask</th>
+        <th class="text-right">Fair</th><th class="text-right">Net Edge</th>
+        <th class="text-right">Score</th><th class="text-right">Conf</th><th>Mode</th>
+      </tr></thead>
+      <tbody>${semanticRecent.map(r => {
+        const q = (r.question || '').slice(0, 60);
+        const sideColor = r.side === 'BUY' ? '#22c55e' : r.side === 'SELL' ? '#ef4444' : '#6b7280';
+        return `<tr>
+          <td style="color:#6b7280;white-space:nowrap;font-size:10px">${(r.timestamp || '').slice(0, 19).replace('T', ' ')}</td>
+          <td style="color:${sideColor};font-weight:600">${r.side}</td>
+          <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${q}">${q}</td>
+          <td style="font-size:11px;color:#9ca3af">${r.synthetic_method}</td>
+          <td class="text-right mono">${Number(r.best_bid).toFixed(4)}</td>
+          <td class="text-right mono">${Number(r.best_ask).toFixed(4)}</td>
+          <td class="text-right mono" style="color:#60a5fa">${Number(r.synthetic_fair).toFixed(4)}</td>
+          <td class="text-right mono" style="color:${Number(r.net_edge) >= 0.02 ? '#22c55e' : '#9ca3af'}">${(Number(r.net_edge) * 100).toFixed(2)}¢</td>
+          <td class="text-right mono">${Number(r.score).toFixed(2)}</td>
+          <td class="text-right mono">${Number(r.synthetic_confidence).toFixed(2)}</td>
+          <td style="font-size:11px">${r.mode}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>
+  </div>` : `
+  <div class="card" style="margin-top:12px"><p style="color:#6b7280;font-size:13px">No semantic signals recorded yet. Enable via <span class="mono">SEMANTIC_ENGINE_ENABLED=true</span> to start the shadow observer.</p></div>`}
+</div>
+<div class="divider"></div>
+` : ''}
 
 <div class="section" id="config">
   <h2>Configuration${botState ? ' (live from bot)' : ' (defaults)'}</h2>

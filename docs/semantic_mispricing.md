@@ -152,6 +152,24 @@ Before switching `SEMANTIC_ENGINE_MODE=live`, inspect:
 3. Relation-kind mix — too many textual NEAR_EQUIVALENT hits is a red flag.
 4. Correlation of score with realised PnL in paper runs.
 
+### Dashboard surface
+
+The static dashboard (`generate_dashboard.js` → `docs/dashboard.html`) renders
+a `Semantic Mispricing Engine` section whenever rows exist in
+`semantic_signals` *or* the live bot exports a `semantic` block in
+`bot_state.json` (engine currently enabled).  The section shows:
+
+* engine state from config (enabled, mode, thresholds),
+* aggregate counts (total detections, BUY/SELL split),
+* averages (score, net edge, synthetic confidence),
+* synthetic-method mix,
+* the last 20 detections with market, method, bid/ask, fair, net edge,
+  score, confidence and mode.
+
+The same aggregate is produced by
+`SQLiteStore.semantic_signals_summary()` — reuse that helper for any
+CLI / alerting glue instead of re-querying the table.
+
 ## Limitations
 
 * **No LLM**. Textual similarity is stdlib-only; genuinely paraphrased

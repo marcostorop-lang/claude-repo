@@ -132,7 +132,7 @@ def run_loop(cfg: Config) -> None:
 
         tick_count += 1
         # Export bot state for dashboard every tick
-        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client)
+        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client, store)
 
         logger.debug("Sleeping %d s …", cfg.poll_interval)
         for _ in range(cfg.poll_interval):
@@ -228,6 +228,7 @@ def _export_bot_state(
     strategy: BaseStrategy,
     tick_count: int,
     client: PolymarketClient,
+    store: SQLiteStore | None = None,
 ) -> None:
     """Write a JSON file with current bot state for the dashboard to consume."""
     try:
@@ -271,6 +272,34 @@ def _export_bot_state(
             },
             "positions": positions_data,
         }
+
+        # Semantic mispricing engine: observer visibility.  We export the
+        # summary whenever the engine is enabled OR whenever any signals
+        # already exist in the DB (so the dashboard keeps showing history
+        # after the operator flips the engine off).  Read-only; any error
+        # is swallowed so dashboard export never breaks the tick.
+        if store is not None:
+            semantic_cfg = {
+                "enabled": bool(getattr(cfg, "semantic_engine_enabled", False)),
+                "mode": getattr(cfg, "semantic_engine_mode", "shadow"),
+                "min_net_edge": getattr(cfg, "semantic_min_net_edge", None),
+                "min_signal_score": getattr(cfg, "semantic_min_signal_score", None),
+                "min_relation_confidence": getattr(
+                    cfg, "semantic_min_relation_confidence", None
+                ),
+            }
+            summary = {}
+            try:
+                summary = store.semantic_signals_summary()
+            except Exception:
+                logger.debug("semantic_signals_summary failed.", exc_info=True)
+                summary = {}
+            if semantic_cfg["enabled"] or (summary and summary.get("count", 0) > 0):
+                state["semantic"] = {
+                    "config": semantic_cfg,
+                    "summary": summary or {"count": 0},
+                }
+
         with open("bot_state.json", "w") as f:
             json.dump(state, f, indent=2)
     except Exception:
