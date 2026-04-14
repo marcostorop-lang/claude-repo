@@ -20,6 +20,12 @@
 | `DB_BACKUP_DIR` | *(empty)* | Set to enable periodic online SQLite backups |
 | `DB_BACKUP_INTERVAL_HOURS` | `24` | How often to snapshot |
 | `DB_BACKUP_KEEP` | `7` | How many snapshots to retain |
+| `RESOLUTION_SWEEPER_ENABLED` | `false` | Auto-close positions when their market resolves |
+| `RESOLUTION_SWEEP_INTERVAL_MINUTES` | `60` | How often the sweeper polls Gamma |
+| `POSITION_STALENESS_DAYS` | `0` | 0 = off; >0 flags positions open that long without movement |
+| `POSITION_STALENESS_PRICE_EPSILON` | `0.01` | Price range under which a window is "no movement" |
+| `POSITION_STALENESS_ACTION` | `alert` | `alert` \| `close` — escalation policy |
+| `POSITION_STALENESS_INTERVAL_MINUTES` | `120` | How often staleness scans run |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -202,6 +208,27 @@ polling `/api/overview` and paging on `bot_active=false` or a
 pre-configured daily-loss watermark is the recommended compensating
 control.
 
+### Position hygiene (auto-resolution + staleness)
+
+Two opt-in subsystems in `src/portfolio/` help keep the books honest
+on a long-running paper (or live) bot:
+
+- **Resolution sweeper** — `RESOLUTION_SWEEPER_ENABLED=true` polls
+  Gamma every `RESOLUTION_SWEEP_INTERVAL_MINUTES` (default 60 min) and
+  books a synthetic settlement fill at the outcome price ($1 or $0)
+  for any position whose market has resolved.  Writes a trade row
+  (`mode=paper_resolution`, `exit_reason=market_resolved`), a
+  resolution row (ground-truth audit), and emits an alert + metric.
+  Never places a live order — even in live mode, settlement is
+  accounting-only.
+- **Staleness monitor** — `POSITION_STALENESS_DAYS>0` flags positions
+  older than that window whose price range has stayed inside
+  `POSITION_STALENESS_PRICE_EPSILON` (default 0.01).
+  `POSITION_STALENESS_ACTION=alert` (default) just notifies;
+  `=close` additionally exits the position through the normal
+  executor (respects paper/live + maker-preferred).  Scans run every
+  `POSITION_STALENESS_INTERVAL_MINUTES` (default 120 min).
+
 ---
 
 ## Known risks (as of 2026-04)
@@ -214,8 +241,30 @@ control.
 | Over-exposure on neg-risk legs | `NET_PAIRED_LEGS=true` nets opposing sides | Off by default — must enable for multi-leg strategies |
 | API rate-limit hit | Poll interval default 60s; `MAX_MARKETS_FETCH=500` | No exponential backoff yet |
 | Dashboard vs. backend drift | `/api/health`, typed JSON contracts | Manual inspection still required after schema migrations |
+| Phantom exposure in resolved markets | `RESOLUTION_SWEEPER_ENABLED=true` auto-closes at settlement | Off by default — enable on long-running bots |
+| Capital trapped in dormant positions | `POSITION_STALENESS_DAYS>0` alerts/closes flat-price holds | Off by default — pick `alert` first to tune thresholds |
 
 ---
+
+## Running in Docker
+
+A minimal `Dockerfile` + `docker-compose.yml` live at the repo root.
+They package the bot process only — the dashboard stays on its own
+lifecycle.  Paper mode by default; the two live-trading gates must be
+set explicitly at `docker run` or via a `.env` file alongside
+`docker-compose.yml`.
+
+```bash
+docker compose up -d bot         # build + start
+docker compose logs -f bot       # tail logs (mirrors bot.log inside /data)
+docker compose exec bot python -m src.main summary
+docker compose down              # stop (volume persists)
+```
+
+State (SQLite DB, rotated logs, alerts JSONL, metrics JSONL, backups)
+lives in the `polybot-data` named volume so container rebuilds never
+wipe history.  The image runs as non-root with a read-only root FS;
+all writes go through `/data`.
 
 ## What to NEVER do
 

@@ -338,6 +338,40 @@ class Config:
         default_factory=lambda: _env_int("ALERT_MAX_PER_MINUTE", 20)
     )
 
+    # -- Auto-settlement of resolved markets (opt-in) --------------------------
+    # When a Polymarket market resolves, each outcome token converges to
+    # $1 or $0.  The sweeper walks open positions every N minutes,
+    # detects resolved markets via the Gamma API, and books a
+    # synthetic settlement fill + audit row so the portfolio reflects
+    # reality.  NO live orders are ever placed — settlement is
+    # accounting-only (the exchange has already effected the payout).
+    # Default off: flip ``RESOLUTION_SWEEPER_ENABLED=true`` to activate.
+    resolution_sweeper_enabled: bool = field(
+        default_factory=lambda: _env_bool("RESOLUTION_SWEEPER_ENABLED", False)
+    )
+    resolution_sweep_interval_minutes: float = field(
+        default_factory=lambda: _env_float("RESOLUTION_SWEEP_INTERVAL_MINUTES", 60.0)
+    )
+
+    # -- Staleness monitor (opt-in) --------------------------------------------
+    # Flag (and optionally close) positions that have been open for
+    # more than N days with no meaningful price movement — they
+    # silently tie up capital that a fresher signal could use.
+    # ``0`` (default) disables the feature entirely.  ``action`` is
+    # ``alert`` (safe) or ``close`` (escalate to the normal exit path).
+    position_staleness_days: float = field(
+        default_factory=lambda: _env_float("POSITION_STALENESS_DAYS", 0.0)
+    )
+    position_staleness_price_epsilon: float = field(
+        default_factory=lambda: _env_float("POSITION_STALENESS_PRICE_EPSILON", 0.01)
+    )
+    position_staleness_action: str = field(
+        default_factory=lambda: _env("POSITION_STALENESS_ACTION", "alert")
+    )
+    position_staleness_interval_minutes: float = field(
+        default_factory=lambda: _env_float("POSITION_STALENESS_INTERVAL_MINUTES", 120.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

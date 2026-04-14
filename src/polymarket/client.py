@@ -66,6 +66,41 @@ class PolymarketClient:
             offset += _GAMMA_PAGE_SIZE
         return markets
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
+    def get_market_by_condition_id(self, condition_id: str) -> dict | None:
+        """Fetch a single market's full state by ``condition_id``.
+
+        Unlike :meth:`get_active_markets`, this endpoint returns markets
+        regardless of their ``active``/``closed`` flags — which is the
+        whole point, since we call this to detect *resolved* markets for
+        auto-settlement of portfolio positions.  Returns the raw Gamma
+        payload (including ``closed``, ``resolved``, ``outcomePrices``,
+        ``clobTokenIds``, ``umaResolutionStatus``) or ``None`` on 404 /
+        malformed response.
+
+        Safe to call on an unknown condition_id: 404s are swallowed so
+        the caller can treat missing-as-unresolved.  All other HTTP
+        errors still propagate (with the retry decorator mitigating
+        transient failures) so real outages are visible.
+        """
+        if not condition_id:
+            return None
+        url = f"{self.cfg.gamma_url}/markets/{condition_id}"
+        try:
+            resp = self._http.get(url)
+        except httpx.HTTPError:
+            logger.exception("Market lookup failed for %s", condition_id[:12])
+            raise
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.warning("Non-JSON response for market %s", condition_id[:12])
+            return None
+        return data if isinstance(data, dict) else None
+
     def get_active_markets_limited(self, max_total: int = 500) -> list[dict]:
         """Fetch active markets with an upper bound on total records.
 

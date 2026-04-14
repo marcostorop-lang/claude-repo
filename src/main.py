@@ -166,6 +166,13 @@ def run_loop(cfg: Config) -> None:
     # ``src.storage.backup.should_run`` so disabled (interval<=0 or
     # empty dir) is a true no-op.
     last_db_backup = 0.0
+    # Scheduler state for the resolution sweeper + staleness monitor.
+    # Both run on their own cadence (minutes, not ticks) so a 60 s poll
+    # interval doesn't trigger an API call + settlement pass every
+    # single loop.  ``0.0`` → first check runs immediately when the
+    # feature is enabled.
+    last_resolution_sweep = 0.0
+    last_staleness_check = 0.0
 
     tick_count = 0
     while not _shutdown:
@@ -199,6 +206,63 @@ def run_loop(cfg: Config) -> None:
                             )
             except Exception:
                 logger.exception("DB backup path crashed — continuing.")
+
+        # Periodic resolution sweeper — auto-closes positions whose
+        # markets have settled so the portfolio stops carrying phantom
+        # exposure.  Strictly opt-in; never places live orders (pure
+        # accounting against Polymarket's reported outcome).
+        if cfg.resolution_sweeper_enabled:
+            try:
+                from src.portfolio.resolution_sweeper import (
+                    should_run as _rs_should_run,
+                    sweep_resolved_positions,
+                )
+                if _rs_should_run(
+                    last_resolution_sweep,
+                    cfg.resolution_sweep_interval_minutes,
+                    time.time(),
+                ):
+                    sweep_report = sweep_resolved_positions(
+                        portfolio, client, store, cfg,
+                        alerts=alerts, metrics=metrics, risk_mgr=risk_mgr,
+                    )
+                    last_resolution_sweep = time.time()
+                    if sweep_report.any_resolved:
+                        logger.info(
+                            "Resolution sweep: closed %d position(s) across %d market(s).",
+                            len(sweep_report.resolved), sweep_report.conditions_checked,
+                        )
+            except Exception:
+                logger.exception("Resolution sweeper crashed — continuing.")
+
+        # Periodic staleness monitor — flags (and optionally closes)
+        # positions that have gone nowhere for N days.  Independent of
+        # the resolution sweeper schedule so each subsystem has its
+        # own cadence.
+        if cfg.position_staleness_days > 0:
+            try:
+                from src.portfolio.staleness import (
+                    process_staleness,
+                    should_run as _sl_should_run,
+                )
+                if _sl_should_run(
+                    last_staleness_check,
+                    cfg.position_staleness_interval_minutes,
+                    time.time(),
+                ):
+                    st_report = process_staleness(
+                        portfolio, store, client, cfg,
+                        executor=executor, risk_mgr=risk_mgr,
+                        alerts=alerts, metrics=metrics,
+                    )
+                    last_staleness_check = time.time()
+                    if st_report.any_stale:
+                        logger.info(
+                            "Staleness: %d flagged, %d closed.",
+                            len(st_report.stale), len(st_report.closed),
+                        )
+            except Exception:
+                logger.exception("Staleness monitor crashed — continuing.")
 
         # Circuit breaker check
         if risk_mgr.is_circuit_breaker_active:

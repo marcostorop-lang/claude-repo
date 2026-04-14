@@ -1,0 +1,46 @@
+# Minimise the build context — tests, state, and the dashboard are
+# not needed to run the bot loop and copying them bloats the image
+# and slows rebuilds.
+
+# VCS
+.git
+.gitignore
+.github
+
+# Virtualenvs & caches
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Runtime state (never bake into the image)
+*.db
+*.db-shm
+*.db-wal
+*.log
+bot.log
+/data
+backups/
+
+# Tests (run outside the container via CI)
+tests
+test-results
+
+# Dashboard (separate service)
+dashboard
+
+# Local env + IDE noise
+.env
+.env.local
+.idea
+.vscode
+*.swp
+.DS_Store
+
+# Build artefacts
+dist
+build
+*.egg-info

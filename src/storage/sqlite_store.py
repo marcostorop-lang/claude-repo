@@ -480,6 +480,21 @@ class SQLiteStore:
         rows = cur.fetchall()
         return [row["price"] for row in reversed(rows)]
 
+    def get_price_history_since(self, token_id: str, since_iso: str) -> list[dict]:
+        """Return ``(timestamp, price)`` rows for a token since ``since_iso``.
+
+        Ordered ascending by insertion id.  Used by the staleness
+        monitor to detect "no meaningful price movement in N days".
+        Returns an empty list when the token is unknown or no rows
+        match the cut-off.
+        """
+        cur = self._conn.execute(
+            "SELECT timestamp, price FROM price_history "
+            "WHERE token_id = ? AND timestamp >= ? ORDER BY id ASC",
+            (token_id, since_iso),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     # -- Markets cache ---------------------------------------------------------
 
     def upsert_market(self, condition_id: str, question: str, data: str, updated_at: str) -> None:
