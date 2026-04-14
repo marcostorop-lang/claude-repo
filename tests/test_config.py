@@ -52,11 +52,36 @@ class TestConfig:
         assert cfg.is_live is False
 
     def test_live_mode_enabled(self):
-        cfg = _make_config(TRADING_MODE="live", ALLOW_LIVE_TRADING="true")
+        # Both gates required: ALLOW_LIVE_TRADING AND I_UNDERSTAND_REAL_MONEY
+        cfg = _make_config(
+            TRADING_MODE="live",
+            ALLOW_LIVE_TRADING="true",
+            I_UNDERSTAND_REAL_MONEY="YES_TRADE_REAL_FUNDS",
+        )
         assert cfg.is_live is True
 
+    def test_live_mode_blocked_without_confirmation_phrase(self):
+        """Second gate: ALLOW_LIVE_TRADING alone is not enough."""
+        cfg = _make_config(TRADING_MODE="live", ALLOW_LIVE_TRADING="true")
+        assert cfg.is_live is False
+        problems = cfg.validate()
+        assert any("I_UNDERSTAND_REAL_MONEY" in p for p in problems)
+
+    def test_live_mode_blocked_on_phrase_typo(self):
+        cfg = _make_config(
+            TRADING_MODE="live",
+            ALLOW_LIVE_TRADING="true",
+            I_UNDERSTAND_REAL_MONEY="yes_trade_real_funds",  # wrong case
+        )
+        assert cfg.is_live is False
+
     def test_validate_warns_on_live_without_key(self):
-        cfg = _make_config(TRADING_MODE="live", ALLOW_LIVE_TRADING="true", PRIVATE_KEY="")
+        cfg = _make_config(
+            TRADING_MODE="live",
+            ALLOW_LIVE_TRADING="true",
+            I_UNDERSTAND_REAL_MONEY="YES_TRADE_REAL_FUNDS",
+            PRIVATE_KEY="",
+        )
         problems = cfg.validate()
         assert any("PRIVATE_KEY" in p for p in problems)
 

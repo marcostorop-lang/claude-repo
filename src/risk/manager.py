@@ -83,6 +83,7 @@ class RiskManager:
         confidence: float,
         liquidity: float = 0.0,
         edge: float | None = None,
+        book_depth_usd: float = 0.0,
     ) -> float:
         """Compute the proposed position size in shares.
 
@@ -92,7 +93,11 @@ class RiskManager:
           capped at 1.0 to avoid oversizing.
         - Signal confidence (linear: size *= confidence)
           — skipped when edge-Kelly is active (edge-Kelly already uses confidence).
-        - Available liquidity (cap at max_liquidity_fraction of reported liquidity)
+        - Available liquidity (cap at max_liquidity_fraction of reported liquidity).
+        - Real order-book depth when provided (cap at
+          ``MAX_BOOK_DEPTH_FRACTION * book_depth_usd``) — this is *more*
+          accurate than the ``liquidity`` cap because it uses the actual
+          fillable USD within 5% of midpoint on the relevant side.
         """
         if price <= 0:
             return 0.0
@@ -128,6 +133,22 @@ class RiskManager:
                     self.cfg.max_liquidity_fraction * 100, liquidity,
                 )
                 base_usd = max_usd_from_liq
+
+        # Book-depth cap: stricter than the liquidity cap because it uses
+        # the actual fillable USD within 5% of midpoint on the relevant
+        # side, as measured from the current order book.  Only applied
+        # when the operator has opted in and a depth value was passed.
+        depth_cap = getattr(self.cfg, "max_book_depth_fraction", 0.0) or 0.0
+        if book_depth_usd > 0 and depth_cap > 0:
+            max_usd_from_depth = book_depth_usd * depth_cap
+            if base_usd > max_usd_from_depth:
+                logger.debug(
+                    "Sizing capped by book depth: $%.2f -> $%.2f "
+                    "(%.0f%% of $%.0f depth_5pct)",
+                    base_usd, max_usd_from_depth,
+                    depth_cap * 100, book_depth_usd,
+                )
+                base_usd = max_usd_from_depth
 
         return base_usd / price
 
@@ -195,13 +216,40 @@ class RiskManager:
                 return RiskVerdict(False, 0.0, f"Price {price:.4f} above max {self.cfg.max_price:.4f} (near-certain, low edge).")
 
         # --- Max open positions ---
-        open_count = self.portfolio.open_position_count()
-        if signal.action == Action.BUY and open_count >= self.cfg.max_open_positions:
-            return RiskVerdict(False, 0.0, f"Max open positions ({self.cfg.max_open_positions}) reached.")
+        # When NET_PAIRED_LEGS is on, count distinct *events* (condition_ids)
+        # not distinct tokens — a second BUY on the other side of a binary
+        # Yes/No is a cap-lock, not a new independent position.  Also, if
+        # the pending BUY would *add* to a paired leg, it doesn't consume
+        # a new slot.
+        if signal.action == Action.BUY:
+            paired_leg = False
+            condition_id = signal.features.get("condition_id") if signal.features else None
+            if getattr(self.cfg, "net_paired_legs", False):
+                open_count = self.portfolio.event_slot_count()
+                if condition_id:
+                    paired_leg = self.portfolio.is_paired_leg_buy(condition_id, token_id)
+                # A paired leg does not consume a new slot
+                if not paired_leg and open_count >= self.cfg.max_open_positions:
+                    return RiskVerdict(
+                        False, 0.0,
+                        f"Max open events ({self.cfg.max_open_positions}) reached "
+                        f"[net_paired_legs].",
+                    )
+            else:
+                open_count = self.portfolio.open_position_count()
+                if open_count >= self.cfg.max_open_positions:
+                    return RiskVerdict(False, 0.0, f"Max open positions ({self.cfg.max_open_positions}) reached.")
 
         # --- Per-event concentration limit ---
         if signal.action == Action.BUY:
-            event_exposure = self.portfolio.exposure_by_condition(token_id)
+            if getattr(self.cfg, "net_paired_legs", False):
+                # Net notionals: a cap-locked pair has near-zero net
+                # directional exposure, so letting both legs through is
+                # correct.  Fallback to gross when no condition_id is known.
+                cid = (signal.features.get("condition_id") if signal.features else None) or token_id
+                event_exposure = self.portfolio.net_exposure_by_condition(cid)
+            else:
+                event_exposure = self.portfolio.exposure_by_condition(token_id)
             if event_exposure >= self.cfg.max_exposure_per_event:
                 return RiskVerdict(False, 0.0, f"Event exposure ${event_exposure:.2f} exceeds limit ${self.cfg.max_exposure_per_event:.2f}.")
 

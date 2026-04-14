@@ -510,11 +510,36 @@ def _tick(
                 sig_edge = float(raw_edge)
         except (TypeError, ValueError):
             sig_edge = None
+
+        # Inject condition_id into the signal features so the risk manager's
+        # paired-leg check can net opposing BUYs of the same event.  Strategies
+        # don't need to know the event structure themselves.
+        if sig.features is None:
+            sig.features = {}
+        sig.features.setdefault("condition_id", snap.condition_id)
+
+        # Opt-in: pre-fetch a cheap book analysis to get fillable depth so
+        # ``compute_position_size`` can cap the base notional by real depth
+        # rather than by the flat ``liquidity`` field.  Skipped when the
+        # feature is off so we don't pay the extra API call.
+        book_depth_usd = 0.0
+        if getattr(cfg, "max_book_depth_fraction", 0.0) > 0:
+            try:
+                depth_ba = client.get_book_analysis(snap.token_id, fill_size_usd=50.0)
+                if depth_ba is not None:
+                    book_depth_usd = (
+                        depth_ba.ask_depth_5pct if sig.action == Action.BUY
+                        else depth_ba.bid_depth_5pct
+                    )
+            except Exception:  # pragma: no cover — defensive: API glitches
+                book_depth_usd = 0.0
+
         proposed_size = risk_mgr.compute_position_size(
             price=snap.price or 0,
             confidence=sig.confidence,
             liquidity=snap.liquidity,
             edge=sig_edge,
+            book_depth_usd=book_depth_usd,
         )
         verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0, category=snap.category)
         if not verdict.allowed:

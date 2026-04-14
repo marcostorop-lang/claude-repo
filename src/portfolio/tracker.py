@@ -162,6 +162,60 @@ class PortfolioTracker:
     def open_position_count(self) -> int:
         return len(self.positions)
 
+    # ------------------------------------------------------------------
+    # Neg-risk / paired-leg accounting
+    # ------------------------------------------------------------------
+
+    def _positions_by_condition(self) -> dict[str, list[Position]]:
+        by_cond: dict[str, list[Position]] = {}
+        for p in self.positions.values():
+            by_cond.setdefault(p.condition_id, []).append(p)
+        return by_cond
+
+    def event_slot_count(self) -> int:
+        """Count *distinct events*, not distinct tokens.
+
+        Opposing BUY-Yes + BUY-No legs on the same ``condition_id`` collapse
+        into a single event slot — a capital-locked market-neutral position
+        is one bet, not two.  Use this as the input to
+        ``MAX_OPEN_POSITIONS`` when ``NET_PAIRED_LEGS=true``.
+        """
+        return len(self._positions_by_condition())
+
+    def net_exposure_by_condition(self, condition_id: str) -> float:
+        """Return the *net* notional exposure for one condition_id.
+
+        BUY and SELL notionals on the same condition offset each other;
+        opposing legs on a binary Yes/No produce near-zero net exposure
+        (capital is parked, but directional risk is ~flat).  Unlike
+        :meth:`exposure_by_condition` which sums gross notionals, this helper
+        is the right number for correlation-risk checks.
+        """
+        if not condition_id:
+            return 0.0
+        net = 0.0
+        for p in self.positions.values():
+            if p.condition_id != condition_id:
+                continue
+            sign = +1.0 if p.side == "BUY" else -1.0
+            net += sign * p.notional_exposure
+        return abs(net)
+
+    def is_paired_leg_buy(self, condition_id: str, token_id: str) -> bool:
+        """True iff opening a BUY on ``token_id`` would create a paired leg.
+
+        A *paired leg* is a second BUY on a different token of the same
+        ``condition_id`` — the hallmark of a neg-risk cap-lock.  Lets the
+        risk manager treat the second leg as a free slot when paired-leg
+        netting is enabled.
+        """
+        if not condition_id:
+            return False
+        for p in self.positions.values():
+            if p.condition_id == condition_id and p.token_id != token_id and p.side == "BUY":
+                return True
+        return False
+
     def total_exposure(self) -> float:
         return sum(p.notional_exposure for p in self.positions.values())
 

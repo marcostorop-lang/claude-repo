@@ -1,0 +1,226 @@
+# Operator Runbook
+
+> Read this before switching the bot on. **This is the only place the
+> authoritative answers to emergency questions live.**
+
+## TL;DR — default-safe defaults
+
+| Setting | Default | Meaning |
+| ------- | ------- | ------- |
+| `TRADING_MODE` | `paper` | No real orders even if credentials are set |
+| `ALLOW_LIVE_TRADING` | `false` | First gate to live |
+| `I_UNDERSTAND_REAL_MONEY` | *(empty)* | Second gate — must equal `YES_TRADE_REAL_FUNDS` exactly |
+| `SHADOW_MODE` | `false` | Shadow runs record decisions but never fill |
+| `SEMANTIC_ENGINE_ENABLED` | `false` | Engine does nothing |
+| `STRATEGY` | `simple_momentum` | Conservative default strategy |
+| `NET_PAIRED_LEGS` | `false` | Count distinct tokens as slots (old behaviour) |
+| `MAX_BOOK_DEPTH_FRACTION` | `0` | Liquidity cap only (old behaviour) |
+
+When in doubt, change nothing. The defaults have been validated against
+the full 373-test suite and the one rule from `CLAUDE.md` is never to
+rebuild from scratch.
+
+---
+
+## Emergency: stop the bot NOW
+
+### Option A — graceful (preferred)
+
+Create the kill-switch file in the working directory. The tick loop
+checks for it at the top of every iteration and shuts down cleanly,
+completing any in-flight execution first:
+
+```bash
+touch KILL_SWITCH
+# or whatever KILL_SWITCH_FILE is configured to
+```
+
+The bot logs `KILL SWITCH FILE detected ... shutting down.` and exits.
+Remove the file before restarting.
+
+### Option B — SIGTERM (still graceful)
+
+```bash
+# Find the process
+ps aux | grep "python -m src.main"
+kill <PID>
+```
+
+Python's `KeyboardInterrupt` / `SystemExit` handler in `_tick` is
+defensive — outstanding trades are logged, portfolio state is flushed to
+SQLite, and the DB is closed.
+
+### Option C — SIGKILL (last resort)
+
+```bash
+kill -9 <PID>
+```
+
+Use only if A and B hang. You'll lose the **current-tick** in-memory
+state (any trades that hadn't yet been persisted to SQLite). Restart
+with `_reconstruct_portfolio` — the bot rebuilds open positions from the
+`trades` table on startup, so an orderly restart recovers to the last
+persisted state.
+
+---
+
+## Recovering from a crash
+
+1. Check `bot.log` for the last `tick_stats` line — that's the last
+   successful tick.
+2. Check `trades` table for any BUY without a matching SELL — those are
+   open positions.
+3. Check `decision_log` for `RISK_REJECTED` spikes right before the
+   crash — often the root cause is a config mismatch or API hiccup.
+4. Restart the bot with the same `SQLITE_DB_PATH`. It will:
+   - Reconstruct portfolio state from `trades`.
+   - Resume risk checks (daily-loss counter **does** reset on date change,
+     not on restart — this is intentional, see `RiskManager._maybe_reset_daily`).
+
+---
+
+## Activating live trading
+
+**Never do this in a single session. Staged ramp required.**
+
+### Stage 0 — paper only, default strategy
+
+Already where you start. Confirm:
+
+```bash
+tail -f bot.log | grep tick_stats
+```
+
+Look for non-zero `signals_generated`, non-degenerate `realised_pnl`
+over several days. If PnL is implausible, something is mis-configured
+before touching anything else.
+
+### Stage 1 — paper + semantic engine in shadow
+
+```bash
+SEMANTIC_ENGINE_ENABLED=true
+SEMANTIC_ENGINE_MODE=shadow
+STRATEGY=simple_momentum
+```
+
+Run for at least 3 days. Inspect:
+
+```bash
+# Dashboard endpoints
+curl http://localhost:8000/api/semantic/summary?days=3
+curl http://localhost:8000/api/semantic/calibration?days=3
+```
+
+Review the calibration report. The **single most important check**:
+`structural_complement` should dominate `per_method`. If
+`weighted_avg_equivalent` or `temporal_range` count more hits than
+structural, something is off — textual matching is too loose for your
+market universe.
+
+### Stage 2 — paper + semantic strategy
+
+```bash
+STRATEGY=semantic_mispricing
+SEMANTIC_ENGINE_MODE=live   # still paper globally
+NET_PAIRED_LEGS=true        # only if the engine frequently hits both legs
+MAX_BOOK_DEPTH_FRACTION=0.25
+```
+
+Watch paper PnL for a week. Compare realised vs. detected `net_edge` via
+`/api/semantic/calibration`. If `realisation_ratio` < 0.5 across methods,
+raise `SEMANTIC_MIN_NET_EDGE` until it stabilises above 0.7.
+
+### Stage 3 — live with TINY capital
+
+```bash
+TRADING_MODE=live
+ALLOW_LIVE_TRADING=true
+I_UNDERSTAND_REAL_MONEY=YES_TRADE_REAL_FUNDS   # both gates required
+MAX_POSITION_SIZE=5        # five dollars
+MAX_TOTAL_EXPOSURE=20      # twenty dollars total
+MAX_DAILY_LOSS=5           # five dollars kills trading for the day
+```
+
+Both gates must be set. If `I_UNDERSTAND_REAL_MONEY` is wrong or missing,
+`Config.is_live` returns `False` and `validate()` emits the warning
+`LIVE TRADING BLOCKED`. The bot keeps running in paper.
+
+Watch for:
+
+- first 10 live trades, hand-verify each fill against the Polymarket UI
+- daily loss counter in `bot.log` — circuit-breaker fires at
+  `MAX_DAILY_LOSS` and halts BUYs automatically
+- `RISK_REJECTED` rate vs. `trades_executed` — unusually high rejection
+  rates suggest config drift
+
+### Rollback to paper
+
+```bash
+ALLOW_LIVE_TRADING=false
+# leave I_UNDERSTAND_REAL_MONEY in place — harmless without the first gate
+touch KILL_SWITCH  # stop current live process
+# Remove KILL_SWITCH and restart with updated env
+```
+
+---
+
+## Routine observability checks
+
+### Daily
+
+```bash
+curl http://localhost:8000/api/overview | jq
+curl http://localhost:8000/api/performance | jq
+```
+
+- `daily_pnl` should not trend monotonically negative over 3+ days
+- `current_exposure` should be < `MAX_TOTAL_EXPOSURE`
+- `open_positions` should not be stuck — positions older than 7 days
+  without a SELL are a red flag
+
+### Weekly
+
+```bash
+curl http://localhost:8000/api/strategies | jq
+curl http://localhost:8000/api/semantic/calibration?days=7 | jq
+```
+
+- Strategy ranking: active strategy should be near top by `total_pnl`
+  *or* have a defensible story for why not
+- Semantic calibration `realisation_ratio` by method: structural should
+  be > 0.7; textual/temporal ratios below 0.5 mean raise thresholds
+
+### Alerts (not yet implemented — known gap)
+
+The bot currently emits no push alerts. Until that's added, a cron job
+polling `/api/overview` and paging on `bot_active=false` or a
+pre-configured daily-loss watermark is the recommended compensating
+control.
+
+---
+
+## Known risks (as of 2026-04)
+
+| Risk | Mitigation | Residual |
+| ---- | ---------- | -------- |
+| Live trading accidentally enabled | Two-gate config + paper default | Operator must still type the exact phrase |
+| Semantic textual false positives | `min_relation_confidence=0.65`, `same_category_required=True`, paper-first | Unusual questions will slip through until a human reviews |
+| Stale snapshot price | `MAX_PRICE_BOOK_DIVERGENCE=0.03` rejects mismatched ticks | Book itself can be stale if API degrades |
+| Over-exposure on neg-risk legs | `NET_PAIRED_LEGS=true` nets opposing sides | Off by default — must enable for multi-leg strategies |
+| API rate-limit hit | Poll interval default 60s; `MAX_MARKETS_FETCH=500` | No exponential backoff yet |
+| Dashboard vs. backend drift | `/api/health`, typed JSON contracts | Manual inspection still required after schema migrations |
+
+---
+
+## What to NEVER do
+
+1. **Never** set `ALLOW_LIVE_TRADING=true` on an untested config.
+2. **Never** edit `trades`, `portfolio`, or `semantic_signals` by hand
+   while the bot is running — use SQLite's `BEGIN EXCLUSIVE` or stop the bot first.
+3. **Never** remove `KILL_SWITCH_FILE` logic, the two-gate live check,
+   or `MAX_DAILY_LOSS`. Anyone asking you to "simplify" these limits is
+   wrong.
+4. **Never** commit `.env` files or private keys — `.gitignore` should
+   already prevent this, but audit your PRs.
+5. **Never** run `git push --force` on shared branches without explicit
+   permission.

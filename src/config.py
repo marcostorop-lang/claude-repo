@@ -11,6 +11,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from dotenv import load_dotenv
 
@@ -60,6 +61,14 @@ class Config:
     # -- Trading mode ----------------------------------------------------------
     trading_mode: str = field(default_factory=lambda: _env("TRADING_MODE", "paper"))
     allow_live_trading: bool = field(default_factory=lambda: _env_bool("ALLOW_LIVE_TRADING"))
+    # Second gate: live trading requires BOTH ``ALLOW_LIVE_TRADING=true`` AND
+    # this variable set to the exact phrase below.  A typo in either one
+    # keeps the bot in paper mode.  This is defence-in-depth against
+    # accidental production pushes — never remove without replacing with a
+    # stronger mechanism.
+    i_understand_real_money: str = field(
+        default_factory=lambda: _env("I_UNDERSTAND_REAL_MONEY", "")
+    )
     # Shadow mode: generates signals, runs risk checks, persists decisions
     # to decision_log, but never calls the executor and never updates
     # portfolio state.  Useful for A/B testing a new strategy config
@@ -92,6 +101,15 @@ class Config:
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5))
     max_daily_loss: float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS", 50.0))
     max_exposure_per_event: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_EVENT", 100.0))
+    # When True, positions that are opposing sides of the same binary event
+    # (BUY Yes + BUY No on the same condition_id, or symmetric shorts) are
+    # counted as a *single* slot for ``max_open_positions`` and their
+    # notionals are netted for exposure purposes.  Rationale: buying both
+    # legs of a Yes/No is a cap-locked position (capital is locked but
+    # market-neutral), not two independent risks.  Default off to preserve
+    # existing sizing behaviour byte-for-byte; flip on when running
+    # neg-risk / semantic strategies that frequently hold multiple legs.
+    net_paired_legs: bool = field(default_factory=lambda: _env_bool("NET_PAIRED_LEGS", False))
     # Cross-event concentration: max total exposure in one category (e.g. "politics")
     max_exposure_per_category: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_CATEGORY", 150.0))
     max_positions_per_category: int = field(default_factory=lambda: _env_int("MAX_POSITIONS_PER_CATEGORY", 3))
@@ -120,6 +138,15 @@ class Config:
     sizing_confidence_scale: bool = field(default_factory=lambda: _env_bool("SIZING_CONFIDENCE_SCALE", False))
     # Maximum fraction of reported liquidity to consume in a single trade
     max_liquidity_fraction: float = field(default_factory=lambda: _env_float("MAX_LIQUIDITY_FRACTION", 0.02))
+    # Maximum fraction of real order-book depth (within 5% of midpoint, USD)
+    # to consume in a single trade.  Opt-in: when a BookAnalysis is
+    # available at sizing time, the proposed notional is capped at
+    # ``max_book_depth_fraction * depth_5pct_usd`` on the fill side.
+    # Defaults to 0.0 (disabled) so behaviour is unchanged until an
+    # operator opts in.  A conservative production value is 0.25 — take at
+    # most a quarter of visible depth to leave headroom for slippage and
+    # for the book to fill back in before a second tick fires.
+    max_book_depth_fraction: float = field(default_factory=lambda: _env_float("MAX_BOOK_DEPTH_FRACTION", 0.0))
     # Edge-aware (fractional-Kelly) sizing: when True and a signed edge is
     # supplied by the strategy, scale the position by |edge| * confidence *
     # kelly_fraction.  This makes high-edge + high-confidence trades larger
@@ -268,11 +295,18 @@ class Config:
     def is_paper(self) -> bool:
         return self.trading_mode.lower() == "paper"
 
+    # The exact second-gate phrase required alongside ALLOW_LIVE_TRADING=true.
+    # ``ClassVar`` keeps dataclasses from treating this as a field, so the
+    # phrase is a true constant — not something an operator can override
+    # via env without changing source.
+    LIVE_CONFIRMATION_PHRASE: ClassVar[str] = "YES_TRADE_REAL_FUNDS"
+
     @property
     def is_live(self) -> bool:
         return (
             self.trading_mode.lower() == "live"
             and self.allow_live_trading
+            and self.i_understand_real_money == self.LIVE_CONFIRMATION_PHRASE
         )
 
     def effective_min_edge(self, category: str = "") -> float:
@@ -299,6 +333,19 @@ class Config:
             problems.append(
                 "TRADING_MODE=live but ALLOW_LIVE_TRADING is not true. "
                 "Orders will NOT be sent."
+            )
+        # Second-gate check: if the operator set ALLOW_LIVE_TRADING=true
+        # but forgot I_UNDERSTAND_REAL_MONEY (or typo'd), surface it
+        # prominently — we stay in paper regardless.
+        if (
+            self.trading_mode.lower() == "live"
+            and self.allow_live_trading
+            and self.i_understand_real_money != self.LIVE_CONFIRMATION_PHRASE
+        ):
+            problems.append(
+                "LIVE TRADING BLOCKED: I_UNDERSTAND_REAL_MONEY must equal "
+                f"'{self.LIVE_CONFIRMATION_PHRASE}' exactly. "
+                "Bot will operate in paper mode."
             )
         if self.is_live and not self.private_key:
             problems.append("Live trading requires PRIVATE_KEY to be set.")
