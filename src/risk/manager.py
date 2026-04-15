@@ -36,6 +36,11 @@ class RiskManager:
         self._daily_realized_pnl: float = 0.0
         self._current_date: date = date.today()
         self._circuit_breaker_tripped: bool = False
+        # Optional temporal-edge filter (see ``src/analysis/temporal_edge.py``).
+        # Left ``None`` by default; the main loop constructs one and attaches
+        # it when ``TEMPORAL_FILTER_ENABLED=true``.  Risk checks treat
+        # ``None`` as "feature off" — zero runtime cost when disabled.
+        self.temporal_filter = None
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -208,6 +213,20 @@ class RiskManager:
         # --- Circuit breaker ---
         if self.is_circuit_breaker_active and signal.action == Action.BUY:
             return RiskVerdict(False, 0.0, f"Circuit breaker: daily loss ${abs(self._daily_realized_pnl):.2f} exceeds limit.")
+
+        # --- Temporal edge filter ---
+        # Only gates new BUYs — SELL exits always fire (don't strand
+        # positions because the hour is "wrong").  Cold-start is
+        # fail-safe: the filter returns True when insufficient data.
+        if signal.action == Action.BUY and self.temporal_filter is not None:
+            if not self.temporal_filter.is_hour_allowed():
+                from datetime import datetime, timezone
+                h = datetime.now(timezone.utc).hour
+                return RiskVerdict(
+                    False, 0.0,
+                    f"Temporal filter: hour {h:02d} UTC below "
+                    f"win-rate threshold {self.cfg.temporal_min_winrate:.2f}.",
+                )
 
         # --- Duplicate position prevention ---
         if signal.action == Action.BUY and token_id in self.portfolio.positions:

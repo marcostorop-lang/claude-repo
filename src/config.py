@@ -372,6 +372,28 @@ class Config:
         default_factory=lambda: _env_float("POSITION_STALENESS_INTERVAL_MINUTES", 120.0)
     )
 
+    # -- Temporal edge filter (opt-in) -----------------------------------------
+    # Restrict new BUY entries to UTC hours where our own closed-trade
+    # win-rate clears ``temporal_min_winrate`` with at least
+    # ``temporal_min_samples`` trades in the lookback window.  Default
+    # off; cold-start safe (allows all 24 hours until enough evidence
+    # accumulates).  See ``src/analysis/temporal_edge.py``.
+    temporal_filter_enabled: bool = field(
+        default_factory=lambda: _env_bool("TEMPORAL_FILTER_ENABLED", False)
+    )
+    temporal_min_winrate: float = field(
+        default_factory=lambda: _env_float("TEMPORAL_MIN_WINRATE", 0.65)
+    )
+    temporal_min_samples: int = field(
+        default_factory=lambda: _env_int("TEMPORAL_MIN_SAMPLES", 20)
+    )
+    temporal_window_days: int = field(
+        default_factory=lambda: _env_int("TEMPORAL_WINDOW_DAYS", 30)
+    )
+    temporal_refresh_seconds: float = field(
+        default_factory=lambda: _env_float("TEMPORAL_REFRESH_SECONDS", 3600.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

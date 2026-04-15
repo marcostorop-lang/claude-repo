@@ -106,6 +106,30 @@ def run_loop(cfg: Config) -> None:
         pnl_today = float(reconstruct_stats.get("realised_pnl_today", 0.0) or 0.0)
         if pnl_today != 0.0:
             risk_mgr.seed_daily_pnl(pnl_today)
+
+    # Optional temporal-edge filter: allow BUYs only in UTC hours whose
+    # historical win-rate clears the configured threshold.  Constructed
+    # here (not inside RiskManager) so it can read from the SQLiteStore
+    # closed-calibration table lazily — no new coupling on RiskManager.
+    if getattr(cfg, "temporal_filter_enabled", False):
+        try:
+            from src.analysis.temporal_edge import TemporalFilter
+            risk_mgr.temporal_filter = TemporalFilter(
+                load_calibration=store.get_calibration_closed,
+                min_winrate=cfg.temporal_min_winrate,
+                min_samples=cfg.temporal_min_samples,
+                window_days=cfg.temporal_window_days,
+                ttl_seconds=cfg.temporal_refresh_seconds,
+            )
+            logger.info(
+                "Temporal edge filter enabled (min_winrate=%.2f, min_samples=%d, window=%dd).",
+                cfg.temporal_min_winrate,
+                cfg.temporal_min_samples,
+                cfg.temporal_window_days,
+            )
+        except Exception:
+            logger.exception("Failed to build TemporalFilter — running without.")
+            risk_mgr.temporal_filter = None
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)

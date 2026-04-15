@@ -26,6 +26,10 @@
 | `POSITION_STALENESS_PRICE_EPSILON` | `0.01` | Price range under which a window is "no movement" |
 | `POSITION_STALENESS_ACTION` | `alert` | `alert` \| `close` — escalation policy |
 | `POSITION_STALENESS_INTERVAL_MINUTES` | `120` | How often staleness scans run |
+| `TEMPORAL_FILTER_ENABLED` | `false` | Gate BUYs to UTC hours with proven edge |
+| `TEMPORAL_MIN_WINRATE` | `0.65` | Minimum hourly win-rate to allow BUYs |
+| `TEMPORAL_MIN_SAMPLES` | `20` | Hourly trade count below which filter stays fail-safe |
+| `TEMPORAL_WINDOW_DAYS` | `30` | Lookback window for hourly win-rate |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -244,6 +248,7 @@ on a long-running paper (or live) bot:
 | Phantom exposure in resolved markets | `RESOLUTION_SWEEPER_ENABLED=true` auto-closes at settlement | Off by default — enable on long-running bots |
 | Capital trapped in dormant positions | `POSITION_STALENESS_DAYS>0` alerts/closes flat-price holds | Off by default — pick `alert` first to tune thresholds |
 | Daily circuit breaker reset by crash | Startup now seeds `RiskManager.daily_pnl` from trades booked since UTC midnight | Relies on accurate `timestamp` column; bad system clock weakens the check |
+| Trading at structurally losing hours | `TEMPORAL_FILTER_ENABLED=true` gates BUYs to UTC hours where the realised win-rate clears `TEMPORAL_MIN_WINRATE` | Off by default; cold-start fail-safe so it allows all 24 hours until enough samples — turn on only once calibration has weeks of closed trades |
 
 ---
 
