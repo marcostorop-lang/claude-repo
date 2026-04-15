@@ -41,6 +41,9 @@ class RiskManager:
         # it when ``TEMPORAL_FILTER_ENABLED=true``.  Risk checks treat
         # ``None`` as "feature off" — zero runtime cost when disabled.
         self.temporal_filter = None
+        # Optional price-history loader for the volatility filter.  Signature:
+        # ``(token_id, limit) -> list[float]`` (oldest→newest).  None disables.
+        self.get_price_history = None
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -247,6 +250,36 @@ class RiskManager:
                     f"Temporal filter: hour {h:02d} UTC below "
                     f"win-rate threshold {self.cfg.temporal_min_winrate:.2f}.",
                 )
+
+        # --- Volatility filter ---
+        # Reject BUYs on tokens whose recent price stddev exceeds the
+        # threshold.  Cold-start fail-safe: insufficient history → allow.
+        # Never gates SELLs — always lets us exit a stale/chaotic market.
+        if (
+            signal.action == Action.BUY
+            and getattr(self.cfg, "volatility_filter_enabled", False)
+            and self.get_price_history is not None
+        ):
+            try:
+                from src.analysis.volatility import is_too_volatile
+                prices = self.get_price_history(
+                    token_id, limit=self.cfg.volatility_window,
+                ) or []
+                too_vol, measured = is_too_volatile(
+                    prices,
+                    window=self.cfg.volatility_window,
+                    max_vol=self.cfg.max_price_volatility,
+                )
+                if too_vol:
+                    return RiskVerdict(
+                        False, 0.0,
+                        f"Volatility {measured:.4f} exceeds max "
+                        f"{self.cfg.max_price_volatility:.4f} "
+                        f"(window={self.cfg.volatility_window}).",
+                    )
+            except Exception:
+                # Fail open — never let a loader bug freeze trading.
+                logger.exception("Volatility filter errored — allowing trade.")
 
         # --- Duplicate position prevention ---
         if signal.action == Action.BUY and token_id in self.portfolio.positions:

@@ -404,6 +404,22 @@ class Config:
         default_factory=lambda: _env_float("TEMPORAL_REFRESH_SECONDS", 3600.0)
     )
 
+    # -- Volatility filter (opt-in) --------------------------------------------
+    # Reject BUYs on tokens whose recent raw-price stddev exceeds
+    # ``max_price_volatility`` (in $-of-price units, since prices live
+    # in [0, 1]).  Cold-start fail-safe: a token with fewer than
+    # ``volatility_window`` samples is *not* presumed volatile.
+    # Default off.  See ``src/analysis/volatility.py``.
+    volatility_filter_enabled: bool = field(
+        default_factory=lambda: _env_bool("VOLATILITY_FILTER_ENABLED", False)
+    )
+    max_price_volatility: float = field(
+        default_factory=lambda: _env_float("MAX_PRICE_VOLATILITY", 0.05)
+    )
+    volatility_window: int = field(
+        default_factory=lambda: _env_int("VOLATILITY_WINDOW", 10)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

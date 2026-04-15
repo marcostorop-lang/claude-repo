@@ -32,6 +32,9 @@
 | `TEMPORAL_WINDOW_DAYS` | `30` | Lookback window for hourly win-rate |
 | `SIZING_KELLY_PROPER` | `false` | Use exact Kelly formula (p,b,q) for sizing |
 | `KELLY_FRACTION` | `0.25` | Fractional-Kelly multiplier (1.0 = full, 0.25 = quarter) |
+| `VOLATILITY_FILTER_ENABLED` | `false` | Reject BUYs on choppy tokens |
+| `MAX_PRICE_VOLATILITY` | `0.05` | Max stddev (in $-of-price) over the window |
+| `VOLATILITY_WINDOW` | `10` | Samples used to compute recent-price stddev |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to

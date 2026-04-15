@@ -130,6 +130,18 @@ def run_loop(cfg: Config) -> None:
         except Exception:
             logger.exception("Failed to build TemporalFilter — running without.")
             risk_mgr.temporal_filter = None
+
+    # Optional volatility filter: reject BUYs on choppy tokens.  We
+    # attach the store's price-history loader (bound method, so it
+    # captures the current DB connection) — RiskManager treats a None
+    # loader as "feature off".  Cold-start fail-safe (see
+    # ``src/analysis/volatility.py``).
+    if getattr(cfg, "volatility_filter_enabled", False):
+        risk_mgr.get_price_history = store.get_price_history
+        logger.info(
+            "Volatility filter enabled (max_stddev=%.4f over last %d samples).",
+            cfg.max_price_volatility, cfg.volatility_window,
+        )
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)
