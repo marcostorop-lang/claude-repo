@@ -35,6 +35,10 @@
 | `VOLATILITY_FILTER_ENABLED` | `false` | Reject BUYs on choppy tokens |
 | `MAX_PRICE_VOLATILITY` | `0.05` | Max stddev (in $-of-price) over the window |
 | `VOLATILITY_WINDOW` | `10` | Samples used to compute recent-price stddev |
+| `BAYESIAN_CALIBRATION_ENABLED` | `false` | Track Beta(α,β) posterior per strategy (silent) |
+| `BAYESIAN_SIZING_ENABLED` | `false` | Apply posterior-mean multiplier to sizing (shrinks only) |
+| `BAYESIAN_MIN_SAMPLES` | `30` | Trades required before multiplier activates |
+| `BAYESIAN_MIN_MULTIPLIER` | `0.3` | Floor on the sizing multiplier |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to

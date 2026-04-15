@@ -420,6 +420,35 @@ class Config:
         default_factory=lambda: _env_int("VOLATILITY_WINDOW", 10)
     )
 
+    # -- Bayesian calibration (opt-in, default off) ----------------------------
+    # Tracks a Beta(α, β) posterior per strategy, updated after each
+    # closed trade (win → α+=1, loss → β+=1).  When
+    # ``BAYESIAN_SIZING_ENABLED=true`` the posterior mean is used as a
+    # sizing multiplier clamped to ``[BAYESIAN_MIN_MULT, 1.0]`` —
+    # asymmetric: can only size *down* a losing strategy, never up.
+    # Cold-start fail-safe: until ``BAYESIAN_MIN_SAMPLES`` trades
+    # accrue, the multiplier is 1.0 (no effect).  Enabling only
+    # ``BAYESIAN_CALIBRATION_ENABLED`` runs the tracker silently so
+    # the operator can accumulate evidence before toggling sizing on.
+    bayesian_calibration_enabled: bool = field(
+        default_factory=lambda: _env_bool("BAYESIAN_CALIBRATION_ENABLED", False)
+    )
+    bayesian_sizing_enabled: bool = field(
+        default_factory=lambda: _env_bool("BAYESIAN_SIZING_ENABLED", False)
+    )
+    bayesian_min_samples: int = field(
+        default_factory=lambda: _env_int("BAYESIAN_MIN_SAMPLES", 30)
+    )
+    bayesian_min_multiplier: float = field(
+        default_factory=lambda: _env_float("BAYESIAN_MIN_MULTIPLIER", 0.3)
+    )
+    bayesian_prior_alpha: float = field(
+        default_factory=lambda: _env_float("BAYESIAN_PRIOR_ALPHA", 1.0)
+    )
+    bayesian_prior_beta: float = field(
+        default_factory=lambda: _env_float("BAYESIAN_PRIOR_BETA", 1.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

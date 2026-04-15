@@ -44,6 +44,13 @@ class RiskManager:
         # Optional price-history loader for the volatility filter.  Signature:
         # ``(token_id, limit) -> list[float]`` (oldest→newest).  None disables.
         self.get_price_history = None
+        # Optional Bayesian calibrator (see
+        # ``src/analysis/bayesian_calibrator.py``).  When attached *and*
+        # ``BAYESIAN_SIZING_ENABLED=true`` is set, ``compute_position_size``
+        # applies a posterior-mean multiplier for the strategy that
+        # produced the signal.  ``None`` means the feature is off; zero
+        # runtime cost in that case.
+        self.bayesian_calibrator = None
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -127,6 +134,7 @@ class RiskManager:
         liquidity: float = 0.0,
         edge: float | None = None,
         book_depth_usd: float = 0.0,
+        strategy: str = "",
     ) -> float:
         """Compute the proposed position size in shares.
 
@@ -212,6 +220,29 @@ class RiskManager:
                     depth_cap * 100, book_depth_usd,
                 )
                 base_usd = max_usd_from_depth
+
+        # Bayesian posterior multiplier: applied *last*, strictly in
+        # ``[min_mult, 1.0]`` so it can only shrink a strategy's size
+        # (never amplify it).  Cold-start returns 1.0, so this branch
+        # is a transparent no-op until enough evidence has accrued.
+        if (
+            getattr(self.cfg, "bayesian_sizing_enabled", False)
+            and self.bayesian_calibrator is not None
+            and strategy
+        ):
+            try:
+                mult = self.bayesian_calibrator.size_multiplier(strategy)
+            except Exception:
+                logger.exception(
+                    "Bayesian size_multiplier failed — skipping shrinkage.",
+                )
+                mult = 1.0
+            if mult < 1.0:
+                logger.debug(
+                    "Bayesian sizing: strategy='%s' mult=%.3f base=$%.2f → $%.2f",
+                    strategy, mult, base_usd, base_usd * mult,
+                )
+            base_usd *= mult
 
         return base_usd / price
 

@@ -147,6 +147,15 @@ class SQLiteStore:
             )
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS bayesian_posterior (
+                strategy    TEXT PRIMARY KEY,
+                alpha       REAL NOT NULL,
+                beta        REAL NOT NULL,
+                n_trades    INTEGER NOT NULL DEFAULT 0,
+                updated_at  TEXT NOT NULL
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp       TEXT NOT NULL,
@@ -561,6 +570,41 @@ class SQLiteStore:
             "accuracy": correct / total if total > 0 else 0.0,
             "total_pnl": total_pnl,
         }
+
+    # -- Bayesian posterior ---------------------------------------------------
+
+    def upsert_bayesian_posterior(
+        self, strategy: str, alpha: float, beta: float,
+        n_trades: int, updated_at: str,
+    ) -> None:
+        """Persist a per-strategy Beta(α, β) posterior.
+
+        Idempotent overwrite — callers compute the new α/β in memory and
+        call this once per update.  Keeps the write path simple and
+        testable without giving the DB layer any opinion on priors.
+        """
+        self._conn.execute(
+            "INSERT INTO bayesian_posterior (strategy, alpha, beta, n_trades, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(strategy) DO UPDATE SET "
+            "alpha=excluded.alpha, beta=excluded.beta, "
+            "n_trades=excluded.n_trades, updated_at=excluded.updated_at",
+            (strategy, alpha, beta, n_trades, updated_at),
+        )
+        self._conn.commit()
+
+    def get_bayesian_posterior(self, strategy: str) -> dict | None:
+        cur = self._conn.execute(
+            "SELECT * FROM bayesian_posterior WHERE strategy = ?", (strategy,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_all_bayesian_posteriors(self) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT * FROM bayesian_posterior ORDER BY strategy ASC",
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def get_traded_condition_ids(self) -> set[str]:
         """Return all condition_ids where we have executed trades."""

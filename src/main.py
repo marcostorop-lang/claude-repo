@@ -142,6 +142,40 @@ def run_loop(cfg: Config) -> None:
             "Volatility filter enabled (max_stddev=%.4f over last %d samples).",
             cfg.max_price_volatility, cfg.volatility_window,
         )
+
+    # Optional Bayesian calibrator.  Always loads (cheap) when the
+    # tracker flag is on; only influences sizing when the sizing flag
+    # is *also* on — operators can run the tracker silently for a
+    # week or two to accrue evidence before flipping sizing on.
+    if getattr(cfg, "bayesian_calibration_enabled", False):
+        try:
+            from src.analysis.bayesian_calibrator import BayesianCalibrator
+            risk_mgr.bayesian_calibrator = BayesianCalibrator(
+                store=store,
+                prior_alpha=cfg.bayesian_prior_alpha,
+                prior_beta=cfg.bayesian_prior_beta,
+                min_samples=cfg.bayesian_min_samples,
+                min_multiplier=cfg.bayesian_min_multiplier,
+            )
+            # If the bayesian table is empty but we have closed
+            # calibration history, seed from it once — gives the
+            # posterior a head start instead of a cold uniform prior.
+            if not store.get_all_bayesian_posteriors():
+                closed = store.get_calibration_closed()
+                if closed:
+                    risk_mgr.bayesian_calibrator.seed_from_closed_trades(closed)
+                    logger.info(
+                        "Seeded bayesian posteriors from %d closed trades.",
+                        len(closed),
+                    )
+            logger.info(
+                "Bayesian calibration enabled (sizing=%s, min_samples=%d, min_mult=%.2f).",
+                "on" if cfg.bayesian_sizing_enabled else "shadow",
+                cfg.bayesian_min_samples, cfg.bayesian_min_multiplier,
+            )
+        except Exception:
+            logger.exception("Failed to build BayesianCalibrator — running without.")
+            risk_mgr.bayesian_calibrator = None
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)
@@ -425,6 +459,15 @@ def _check_exits_only(
                 pnl=pnl,
                 return_pct=return_pct,
             )
+            # Bayesian update (opt-in): win = positive PnL.  Silent
+            # no-op when the calibrator isn't attached.
+            if risk_mgr.bayesian_calibrator is not None:
+                try:
+                    risk_mgr.bayesian_calibrator.record_outcome(
+                        strategy=pos.strategy, won=pnl > 0,
+                    )
+                except Exception:
+                    logger.exception("Bayesian record_outcome failed — skipped.")
 
 
 def _export_bot_state(
@@ -584,6 +627,15 @@ def _tick(
                 pnl=pnl,
                 return_pct=return_pct,
             )
+            # Bayesian update (opt-in): win = positive PnL.  Silent
+            # no-op when the calibrator isn't attached.
+            if risk_mgr.bayesian_calibrator is not None:
+                try:
+                    risk_mgr.bayesian_calibrator.record_outcome(
+                        strategy=pos.strategy, won=pnl > 0,
+                    )
+                except Exception:
+                    logger.exception("Bayesian record_outcome failed — skipped.")
 
     # 2. Fetch market snapshots
     snapshots = market_svc.fetch_and_filter()
@@ -750,6 +802,7 @@ def _tick(
             liquidity=snap.liquidity,
             edge=sig_edge,
             book_depth_usd=book_depth_usd,
+            strategy=cfg.strategy,
         )
         verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0, category=snap.category)
         if not verdict.allowed:
