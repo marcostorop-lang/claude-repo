@@ -91,13 +91,21 @@ def run_loop(cfg: Config) -> None:
     store = SQLiteStore(cfg.sqlite_db_path)
     portfolio = PortfolioTracker()
 
-    # Reconstruct portfolio from trade history so positions survive restarts
+    # Reconstruct portfolio from trade history so positions survive restarts.
+    # Capture today's realised PnL so we can seed the risk manager below —
+    # otherwise a restart after a crashed day would silently reset the
+    # daily-loss circuit breaker to zero.
     all_trades = store.get_all_trades()
+    reconstruct_stats: dict = {}
     if all_trades:
-        portfolio.reconstruct_from_trades(all_trades)
+        reconstruct_stats = portfolio.reconstruct_from_trades(all_trades)
         logger.info("Restored %d open positions from trade history.", portfolio.open_position_count())
 
     risk_mgr = RiskManager(cfg, portfolio)
+    if reconstruct_stats:
+        pnl_today = float(reconstruct_stats.get("realised_pnl_today", 0.0) or 0.0)
+        if pnl_today != 0.0:
+            risk_mgr.seed_daily_pnl(pnl_today)
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)

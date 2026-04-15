@@ -243,6 +243,7 @@ on a long-running paper (or live) bot:
 | Dashboard vs. backend drift | `/api/health`, typed JSON contracts | Manual inspection still required after schema migrations |
 | Phantom exposure in resolved markets | `RESOLUTION_SWEEPER_ENABLED=true` auto-closes at settlement | Off by default — enable on long-running bots |
 | Capital trapped in dormant positions | `POSITION_STALENESS_DAYS>0` alerts/closes flat-price holds | Off by default — pick `alert` first to tune thresholds |
+| Daily circuit breaker reset by crash | Startup now seeds `RiskManager.daily_pnl` from trades booked since UTC midnight | Relies on accurate `timestamp` column; bad system clock weakens the check |
 
 ---
 

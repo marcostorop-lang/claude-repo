@@ -268,15 +268,46 @@ class PortfolioTracker:
                 total += pos.unrealised_pnl(current)
         return total
 
-    def reconstruct_from_trades(self, trades: list[dict]) -> None:
+    def reconstruct_from_trades(self, trades: list[dict]) -> dict:
         """Rebuild open positions and realised PnL from trade history.
 
         Expects trades ordered by timestamp ascending. Each BUY opens or adds
         to a position; each SELL closes or reduces it.  This allows the bot
         to survive restarts without losing portfolio state.
+
+        Returns a stats dict that includes:
+
+        * ``realised_pnl`` — cumulative realised PnL across all trades,
+        * ``realised_pnl_today`` — subset of the above whose PnL delta
+          was booked on the current UTC day, suitable for seeding
+          ``RiskManager`` so the daily-loss circuit breaker remembers
+          today's drawdown across restarts,
+        * ``open_positions`` — number of positions left open.
+
+        The return value is backwards-compatible: older callers
+        that ignore it keep working unchanged.
         """
+        from datetime import datetime, timezone
+
         self.positions.clear()
         self.realised_pnl = 0.0
+
+        today_utc_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0,
+        )
+
+        def _is_today(ts: str) -> bool:
+            if not ts:
+                return False
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return False
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt >= today_utc_start
+
+        realised_today = 0.0
 
         for t in trades:
             token_id = t["token_id"]
@@ -286,10 +317,15 @@ class PortfolioTracker:
             if size <= 0:
                 continue
 
+            # Snapshot realised_pnl *before* this trade so we can isolate
+            # the PnL contribution of trades booked today.  A BUY that
+            # partially closes an opposite-side short, or a SELL that
+            # closes a long, both mutate ``self.realised_pnl`` inside
+            # ``open_position`` — the delta captures it regardless of path.
+            pnl_before = self.realised_pnl
+            ts = t.get("timestamp", "")
+
             if side == "BUY":
-                # Use the merging-aware open_position so repeated BUYs on the
-                # same token produce a weighted-average entry instead of
-                # overwriting the prior fill.
                 self.open_position(
                     Position(
                         token_id=token_id,
@@ -299,14 +335,11 @@ class PortfolioTracker:
                         entry_price=price,
                         strategy=t.get("strategy", ""),
                         order_id=t.get("order_id", ""),
-                        entry_timestamp=t.get("timestamp", ""),
+                        entry_timestamp=ts,
                         category=t.get("category", ""),
                     )
                 )
             elif side == "SELL":
-                # Delegating to open_position handles all cases symmetrically:
-                # same-side merge (SELL+SELL), partial/full close against a
-                # BUY, and flip when the SELL exceeds the long.
                 self.open_position(
                     Position(
                         token_id=token_id,
@@ -316,15 +349,23 @@ class PortfolioTracker:
                         entry_price=price,
                         strategy=t.get("strategy", ""),
                         order_id=t.get("order_id", ""),
-                        entry_timestamp=t.get("timestamp", ""),
+                        entry_timestamp=ts,
                         category=t.get("category", ""),
                     )
                 )
 
+            if _is_today(ts):
+                realised_today += self.realised_pnl - pnl_before
+
         logger.info(
-            "Portfolio reconstructed: %d open positions, realised_pnl=%.4f",
-            len(self.positions), self.realised_pnl,
+            "Portfolio reconstructed: %d open positions, realised_pnl=%.4f, today=%.4f",
+            len(self.positions), self.realised_pnl, realised_today,
         )
+        return {
+            "realised_pnl": self.realised_pnl,
+            "realised_pnl_today": realised_today,
+            "open_positions": len(self.positions),
+        }
 
     def record_fee(self, fee_usd: float) -> None:
         """Add to the cumulative fees-paid counter.

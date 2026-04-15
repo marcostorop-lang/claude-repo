@@ -52,6 +52,41 @@ class RiskManager:
                 abs(self._daily_realized_pnl), self.cfg.max_daily_loss,
             )
 
+    def seed_daily_pnl(self, pnl_today: float) -> None:
+        """Seed the daily PnL accumulator from reconstructed history.
+
+        The bot rebuilds ``PortfolioTracker`` from the ``trades`` table
+        at startup (see :meth:`PortfolioTracker.reconstruct_from_trades`)
+        — but without this hook ``_daily_realized_pnl`` would start at
+        zero on every restart.  That's a real safety bug: a bot that
+        crashed after losing $40 against a $50 daily-loss limit would
+        come back with the full $50 of headroom again, defeating the
+        circuit breaker.
+
+        Idempotent under repeated calls on the same UTC day (later
+        calls overwrite, they don't stack), because the bot loop calls
+        this exactly once at startup with the authoritative figure
+        computed from trade history.  If that figure already breaches
+        the limit, the breaker trips immediately — the restarting bot
+        refuses to open new positions until a new UTC day begins,
+        matching the behaviour it would have had if the crash had not
+        happened.
+        """
+        self._maybe_reset_daily()
+        self._daily_realized_pnl = float(pnl_today)
+        if self._daily_realized_pnl <= -self.cfg.max_daily_loss:
+            self._circuit_breaker_tripped = True
+            logger.warning(
+                "CIRCUIT BREAKER TRIPPED on startup: reconstructed daily loss "
+                "$%.2f exceeds limit $%.2f",
+                abs(self._daily_realized_pnl), self.cfg.max_daily_loss,
+            )
+        else:
+            logger.info(
+                "Daily PnL seeded from trade history: $%+.2f (limit: -$%.2f).",
+                self._daily_realized_pnl, self.cfg.max_daily_loss,
+            )
+
     def _maybe_reset_daily(self) -> None:
         """Reset daily counters if the date has changed."""
         today = date.today()
