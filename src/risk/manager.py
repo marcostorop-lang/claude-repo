@@ -143,13 +143,33 @@ class RiskManager:
             return 0.0
         base_usd = self.cfg.max_position_size
 
+        # Exact Kelly sizing — opt-in, takes precedence when enabled and
+        # a signed edge is available.  Uses the closed-form
+        # f* = (p - price) / (1 - price) for a binary YES bet, then
+        # scaled by KELLY_FRACTION (for retail safety margin) and by
+        # confidence (for model-uncertainty discounting).  A negative
+        # or zero edge collapses to size 0 — we simply won't trade.
+        if getattr(self.cfg, "sizing_kelly_proper", False) and edge is not None:
+            from src.analysis.kelly import kelly_fraction as _kelly
+            f_star = _kelly(price=price, edge=edge)
+            kelly_mult = (
+                f_star * max(confidence, 0.0) * self.cfg.kelly_fraction
+            )
+            kelly_mult = min(max(kelly_mult, 0.0), 1.0)
+            base_usd *= kelly_mult
+            logger.debug(
+                "Proper-Kelly sizing: price=%.4f edge=%+.4f f*=%.4f "
+                "conf=%.3f frac=%.2f → mult=%.4f (base=$%.2f)",
+                price, edge, f_star, confidence,
+                self.cfg.kelly_fraction, kelly_mult, base_usd,
+            )
         # Edge-aware Kelly sizing takes precedence when enabled and edge is known.
         # For prediction markets, edge ≈ P_estimated - P_market.  The Kelly
         # fraction for a binary bet with known edge and true probability p is
         # f* = (p*b - q) / b where b is net odds = 1/price - 1.
         # As a well-behaved proxy we use |edge| * confidence * kelly_fraction,
         # which is linear in edge and trivially bounded in [0, 1].
-        if self.cfg.sizing_edge_kelly and edge is not None and abs(edge) > 0:
+        elif self.cfg.sizing_edge_kelly and edge is not None and abs(edge) > 0:
             # Pure edge-Kelly: size = base * min(|edge| * confidence * kelly_fraction, 1)
             # Tiny edges → tiny positions; filter via MIN_EDGE_FOR_TRADE if
             # execution costs would swamp them.

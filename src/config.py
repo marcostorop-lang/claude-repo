@@ -155,6 +155,16 @@ class Config:
     # Kelly fraction — 1.0 is full Kelly (aggressive), 0.25 is quarter-Kelly
     # (conservative and typical for retail).  Applied on top of |edge| * confidence.
     kelly_fraction: float = field(default_factory=lambda: _env_float("KELLY_FRACTION", 0.25))
+    # Exact-formula Kelly: f* = (p*b - q)/b with p = price+edge and
+    # b = (1-price)/price (for YES shares priced in [0,1]).  Takes
+    # precedence over ``sizing_edge_kelly`` when both are True.  Still
+    # multiplied by ``kelly_fraction`` and ``confidence`` so retail
+    # operators can stay at quarter-Kelly while upgrading the math.
+    # Default off — opt in once the edge estimator has been calibrated
+    # against realised outcomes (see ``src/analysis/calibration.py``).
+    sizing_kelly_proper: bool = field(
+        default_factory=lambda: _env_bool("SIZING_KELLY_PROPER", False)
+    )
     # Minimum edge magnitude to trade (below this → HOLD regardless of confidence)
     min_edge_for_trade: float = field(default_factory=lambda: _env_float("MIN_EDGE_FOR_TRADE", 0.0))
     # Optional per-category overrides for MIN_EDGE_FOR_TRADE.  Expected as

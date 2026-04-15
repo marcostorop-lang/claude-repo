@@ -30,6 +30,8 @@
 | `TEMPORAL_MIN_WINRATE` | `0.65` | Minimum hourly win-rate to allow BUYs |
 | `TEMPORAL_MIN_SAMPLES` | `20` | Hourly trade count below which filter stays fail-safe |
 | `TEMPORAL_WINDOW_DAYS` | `30` | Lookback window for hourly win-rate |
+| `SIZING_KELLY_PROPER` | `false` | Use exact Kelly formula (p,b,q) for sizing |
+| `KELLY_FRACTION` | `0.25` | Fractional-Kelly multiplier (1.0 = full, 0.25 = quarter) |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
