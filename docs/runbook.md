@@ -42,6 +42,9 @@
 | `TAIL_RISK_ENABLED` | `true` | Per-tick VaR/CVaR/worst-case computation |
 | `VAR_95_ALERT_USD` | `0` | Page when 95% VaR exceeds this (0 = silent) |
 | `CVAR_95_ALERT_USD` | `0` | Page when CVaR exceeds this (0 = silent) |
+| `SIZING_CAPITAL_EFFICIENCY_ENABLED` | `false` | Shrink size on long-dated markets (capital-cost penalty) |
+| `SIZING_CAPITAL_EFFICIENCY_TARGET_DAYS` | `14.0` | Markets ≤ this many days are unscaled |
+| `SIZING_CAPITAL_EFFICIENCY_MIN_FACTOR` | `0.25` | Floor on the shrinkage factor for very long-dated markets |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to

@@ -135,6 +135,7 @@ class RiskManager:
         edge: float | None = None,
         book_depth_usd: float = 0.0,
         strategy: str = "",
+        end_date: str = "",
     ) -> float:
         """Compute the proposed position size in shares.
 
@@ -243,6 +244,30 @@ class RiskManager:
                     strategy, mult, base_usd, base_usd * mult,
                 )
             base_usd *= mult
+
+        # Capital-efficiency factor — opt-in shrinkage for *long-dated*
+        # markets.  A 60-day market with the same per-share edge as a
+        # 6-day market earns the same dollars but ties capital up 10x
+        # longer; this factor caps long-dated bets at
+        # ``target_days / days_to_resolution`` (floored at min_factor).
+        # Short-dated markets and missing/unparseable end_date → no
+        # change (factor = 1.0), keeping the path fail-safe.
+        if (
+            getattr(self.cfg, "sizing_capital_efficiency_enabled", False)
+            and end_date
+        ):
+            from src.utils.time_utils import capital_efficiency_factor
+            cap_factor = capital_efficiency_factor(
+                end_date,
+                target_days=self.cfg.sizing_capital_efficiency_target_days,
+                min_factor=self.cfg.sizing_capital_efficiency_min_factor,
+            )
+            if cap_factor < 1.0:
+                logger.debug(
+                    "Capital-efficiency: end_date=%s factor=%.3f base=$%.2f → $%.2f",
+                    end_date, cap_factor, base_usd, base_usd * cap_factor,
+                )
+            base_usd *= cap_factor
 
         return base_usd / price
 

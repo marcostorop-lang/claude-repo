@@ -44,6 +44,40 @@ def hours_until(end_date: str, now: datetime | None = None) -> float | None:
     return max(delta, 0.0)
 
 
+def capital_efficiency_factor(
+    end_date: str,
+    target_days: float = 14.0,
+    min_factor: float = 0.25,
+    now: datetime | None = None,
+) -> float:
+    """Shrinks position sizing for *long-dated* markets.
+
+    The opportunity cost of capital scales with time-to-resolution:
+    a 60-day market with the same per-share edge as a 6-day market
+    earns the same dollars but ties capital up 10x longer.  This
+    factor caps a position at ``target_days / days_to_resolution``
+    once the market is longer than ``target_days``, floored at
+    ``min_factor`` so we still take a meaningful nibble on
+    long-dated bets.
+
+    A short-dated market (≤ target_days) returns 1.0 — this factor
+    intentionally does NOT shrink near-resolution markets; that's
+    handled by :func:`time_decay_factor`.  The two are complementary
+    and can both be active at the same time.
+
+    Empty / unparseable ``end_date`` → 1.0 (no penalty when we don't
+    know — fail-safe consistent with the rest of the bot's posture).
+    """
+    h = hours_until(end_date, now)
+    if h is None:
+        return 1.0
+    days = h / 24.0
+    if days <= target_days:
+        return 1.0
+    factor = target_days / days
+    return max(min_factor, min(1.0, factor))
+
+
 def time_decay_factor(end_date: str, now: datetime | None = None) -> float:
     """Return a [0, 1] multiplier that captures how close a market is to resolution.
 

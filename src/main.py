@@ -813,7 +813,56 @@ def _tick(
             edge=sig_edge,
             book_depth_usd=book_depth_usd,
             strategy=cfg.strategy,
+            end_date=snap.end_date or "",
         )
+
+        # Sizing-trace meta — captures *why* the proposed_size came out the
+        # way it did, for post-hoc reproducibility ("given this logged
+        # decision, can I rebuild the multipliers that produced it?").
+        # Each field is only emitted when its corresponding feature is
+        # actually enabled, so disabled paths stay quiet in the log.
+        sizing_trace: dict[str, float | bool] = {
+            "proposed_size": round(proposed_size, 6),
+        }
+        if getattr(cfg, "sizing_capital_efficiency_enabled", False) and snap.end_date:
+            from src.utils.time_utils import capital_efficiency_factor
+            sizing_trace["capital_efficiency_factor"] = round(
+                capital_efficiency_factor(
+                    snap.end_date,
+                    target_days=cfg.sizing_capital_efficiency_target_days,
+                    min_factor=cfg.sizing_capital_efficiency_min_factor,
+                ),
+                4,
+            )
+        if getattr(cfg, "sizing_kelly_proper", False) and sig_edge is not None:
+            from src.analysis.kelly import kelly_fraction as _kelly_f
+            try:
+                sizing_trace["kelly_f_star"] = round(
+                    _kelly_f(price=snap.price or 0.0, edge=sig_edge), 4,
+                )
+            except Exception:
+                pass
+        if (
+            getattr(cfg, "bayesian_sizing_enabled", False)
+            and risk_mgr.bayesian_calibrator is not None
+        ):
+            try:
+                sizing_trace["bayes_size_mult"] = round(
+                    risk_mgr.bayesian_calibrator.size_multiplier(strategy.name), 4,
+                )
+            except Exception:
+                pass
+        if (
+            getattr(cfg, "temporal_filter_enabled", False)
+            and risk_mgr.temporal_filter is not None
+        ):
+            try:
+                sizing_trace["hour_allowed"] = bool(
+                    risk_mgr.temporal_filter.is_hour_allowed()
+                )
+            except Exception:
+                pass
+
         verdict = risk_mgr.check(snap.token_id, sig, proposed_size, snap.price or 0, spread=snap.spread or 0.0, category=snap.category)
         if not verdict.allowed:
             risk_rejections += 1
@@ -824,7 +873,7 @@ def _tick(
                 strategy=strategy.name, confidence=sig.confidence,
                 price=snap.price or 0, spread=snap.spread or 0,
                 signal_detail=sig.reason, risk_detail=verdict.reason,
-                features=sig.features,
+                features={**(sig.features or {}), **sizing_trace},
             )
             continue
 
@@ -1062,6 +1111,7 @@ def _tick(
             was_partial = actual_size < verdict.adjusted_size - 1e-9
             entry_features = {
                 **sig.features,
+                **sizing_trace,
                 "slippage_pct": round(slippage_pct, 6),
                 "book_imbalance_5pct": round(book_imbalance, 4),
                 "fill_price": round(actual_fill, 4),

@@ -466,6 +466,23 @@ class Config:
         default_factory=lambda: _env_float("CVAR_95_ALERT_USD", 0.0)
     )
 
+    # -- Capital-efficiency sizing (opt-in) ------------------------------------
+    # Shrinks the position when the market resolves more than
+    # ``sizing_capital_efficiency_target_days`` away — capital tied
+    # up longer should earn more per dollar.  Multiplier is
+    # ``target_days / days_to_resolution`` floored at
+    # ``sizing_capital_efficiency_min_factor``.  Default off so
+    # existing paper PnL stays byte-identical until enabled.
+    sizing_capital_efficiency_enabled: bool = field(
+        default_factory=lambda: _env_bool("SIZING_CAPITAL_EFFICIENCY_ENABLED", False)
+    )
+    sizing_capital_efficiency_target_days: float = field(
+        default_factory=lambda: _env_float("SIZING_CAPITAL_EFFICIENCY_TARGET_DAYS", 14.0)
+    )
+    sizing_capital_efficiency_min_factor: float = field(
+        default_factory=lambda: _env_float("SIZING_CAPITAL_EFFICIENCY_MIN_FACTOR", 0.25)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the
