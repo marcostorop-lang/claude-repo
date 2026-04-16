@@ -113,6 +113,21 @@ persisted state.
 
 **Never do this in a single session. Staged ramp required.**
 
+### Pre-launch — `preflight`
+
+**Run this every time before changing live flags:**
+
+```bash
+python -m src.main preflight
+```
+
+Validates the two-gate live config, DB writability, kill-switch
+absence, alert wiring, risk-limit coherence, Polymarket API
+reachability, and (in live mode) wallet balance ≥ MAX_TOTAL_EXPOSURE.
+Exits non-zero if any check FAILs — wire it into your deploy script.
+
+Use `--skip-network` in CI environments without outbound HTTPS.
+
 ### Stage 0 — paper only, default strategy
 
 Already where you start. Confirm:

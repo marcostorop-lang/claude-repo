@@ -1493,5 +1493,23 @@ def cmd_performance_report():
     store.close()
 
 
+@cli.command("preflight")
+@click.option("--skip-network", is_flag=True, default=False,
+              help="Skip Polymarket API + wallet balance probes (CI use).")
+def cmd_preflight(skip_network: bool):
+    """Run pre-launch sanity checks; exit 1 if any FAIL.
+
+    Run this *every time* before changing live-trading flags.  See
+    docs/runbook.md for what each check guards against.
+    """
+    from src.preflight import format_results, run_preflight
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    results = run_preflight(cfg, skip_network=skip_network)
+    click.echo(format_results(results))
+    if any(r.is_blocking() for r in results):
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     cli()
