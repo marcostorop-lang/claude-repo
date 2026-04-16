@@ -171,7 +171,10 @@ class SQLiteStore:
                 daily_pnl       REAL NOT NULL DEFAULT 0.0,
                 skip_warmup     INTEGER NOT NULL DEFAULT 0,
                 skip_no_price   INTEGER NOT NULL DEFAULT 0,
-                skip_hold       INTEGER NOT NULL DEFAULT 0
+                skip_hold       INTEGER NOT NULL DEFAULT 0,
+                var_95          REAL NOT NULL DEFAULT 0.0,
+                cvar_95         REAL NOT NULL DEFAULT 0.0,
+                worst_case      REAL NOT NULL DEFAULT 0.0
             )
         """)
         self._conn.commit()
@@ -205,6 +208,10 @@ class SQLiteStore:
             for col in ("skip_warmup", "skip_no_price", "skip_hold"):
                 if col not in existing_ts:
                     cur.execute(f"ALTER TABLE tick_stats ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+                    logger.info("Migrated tick_stats: added column '%s'", col)
+            for col in ("var_95", "cvar_95", "worst_case"):
+                if col not in existing_ts:
+                    cur.execute(f"ALTER TABLE tick_stats ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0")
                     logger.info("Migrated tick_stats: added column '%s'", col)
         self._conn.commit()
 
@@ -463,12 +470,15 @@ class SQLiteStore:
         skip_warmup: int = 0,
         skip_no_price: int = 0,
         skip_hold: int = 0,
+        var_95: float = 0.0,
+        cvar_95: float = 0.0,
+        worst_case: float = 0.0,
     ) -> None:
         """Record per-tick aggregate statistics for observability."""
         self._conn.execute(
-            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold),
+            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case),
         )
         self._conn.commit()
 

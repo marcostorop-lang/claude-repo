@@ -257,6 +257,16 @@ def run_loop(cfg: Config) -> None:
         # Kill switch file check
         if os.path.exists(cfg.kill_switch_file):
             logger.warning("KILL SWITCH FILE detected (%s) — shutting down.", cfg.kill_switch_file)
+            if alert_mgr is not None:
+                # Critical because operator action: someone (or some
+                # script) explicitly halted the bot.  We want a paging
+                # signal, not a silent file-only entry.
+                alert_mgr.notify(
+                    "critical", "kill switch detected",
+                    {"file": cfg.kill_switch_file,
+                     "open_positions": portfolio.open_position_count(),
+                     "total_exposure": round(portfolio.total_exposure(), 2)},
+                )
             break
 
         # Periodic SQLite online backup.  Cheap: a few-MB DB copies in
@@ -1091,6 +1101,42 @@ def _tick(
         risk_mgr.daily_pnl, summary,
     )
 
+    # Compute portfolio tail risk (VaR/CVaR/worst-case) over open
+    # positions.  Cheap when N <= 12 (exact 2^N enumeration), Monte
+    # Carlo above.  Default-on for observability; alert thresholds
+    # default to 0 (= silent) so an operator must opt into paging.
+    tail_var = tail_cvar = tail_worst = 0.0
+    if getattr(cfg, "tail_risk_enabled", True):
+        try:
+            from src.analysis.tail_risk import compute_tail_risk
+            metrics = compute_tail_risk(
+                portfolio.positions.values(),
+                price_fn=lambda tid: client.get_price(tid),
+                rng_seed=42,  # deterministic across re-ticks
+            )
+            tail_var = metrics.var_95
+            tail_cvar = metrics.cvar_95
+            tail_worst = metrics.worst_case
+            if alert_mgr is not None:
+                if cfg.var_95_alert_usd > 0 and tail_var >= cfg.var_95_alert_usd:
+                    alert_mgr.notify(
+                        "critical", "var 95 breach",
+                        {"var_95_usd": round(tail_var, 2),
+                         "threshold_usd": cfg.var_95_alert_usd,
+                         "n_positions": metrics.n_positions,
+                         "method": metrics.method},
+                    )
+                if cfg.cvar_95_alert_usd > 0 and tail_cvar >= cfg.cvar_95_alert_usd:
+                    alert_mgr.notify(
+                        "critical", "cvar 95 breach",
+                        {"cvar_95_usd": round(tail_cvar, 2),
+                         "threshold_usd": cfg.cvar_95_alert_usd,
+                         "n_positions": metrics.n_positions,
+                         "method": metrics.method},
+                    )
+        except Exception:
+            logger.debug("Tail-risk computation failed.", exc_info=True)
+
     # Persist tick stats for dashboard and analysis
     try:
         store.insert_tick_stats(
@@ -1108,6 +1154,9 @@ def _tick(
             skip_warmup=skip_insufficient_history,
             skip_no_price=skip_no_price,
             skip_hold=skip_hold,
+            var_95=tail_var,
+            cvar_95=tail_cvar,
+            worst_case=tail_worst,
         )
     except Exception:
         logger.debug("Failed to insert tick stats.", exc_info=True)

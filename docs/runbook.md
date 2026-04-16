@@ -39,6 +39,9 @@
 | `BAYESIAN_SIZING_ENABLED` | `false` | Apply posterior-mean multiplier to sizing (shrinks only) |
 | `BAYESIAN_MIN_SAMPLES` | `30` | Trades required before multiplier activates |
 | `BAYESIAN_MIN_MULTIPLIER` | `0.3` | Floor on the sizing multiplier |
+| `TAIL_RISK_ENABLED` | `true` | Per-tick VaR/CVaR/worst-case computation |
+| `VAR_95_ALERT_USD` | `0` | Page when 95% VaR exceeds this (0 = silent) |
+| `CVAR_95_ALERT_USD` | `0` | Page when CVaR exceeds this (0 = silent) |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to

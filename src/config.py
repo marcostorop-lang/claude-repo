@@ -449,6 +449,23 @@ class Config:
         default_factory=lambda: _env_float("BAYESIAN_PRIOR_BETA", 1.0)
     )
 
+    # -- Tail-risk monitoring (opt-in, observational by default) ----------------
+    # Per-tick VaR/CVaR computation over open positions.  Default on
+    # once any position exists (cheap: enumerates 2^N up to N=12, MC
+    # beyond).  Alerts fire only when thresholds are set > 0.
+    tail_risk_enabled: bool = field(
+        default_factory=lambda: _env_bool("TAIL_RISK_ENABLED", True)
+    )
+    # Alert when 95% VaR crosses this level (USD).  0 = no alert.
+    var_95_alert_usd: float = field(
+        default_factory=lambda: _env_float("VAR_95_ALERT_USD", 0.0)
+    )
+    # Alert when CVaR (expected shortfall) crosses this level (USD).
+    # 0 = no alert.  Typically set tighter than ``var_95_alert_usd``.
+    cvar_95_alert_usd: float = field(
+        default_factory=lambda: _env_float("CVAR_95_ALERT_USD", 0.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the
