@@ -214,6 +214,7 @@ curl http://localhost:8000/api/performance | jq
 curl http://localhost:8000/api/strategies | jq
 curl http://localhost:8000/api/semantic/calibration?days=7 | jq
 curl http://localhost:8000/api/risk | jq
+curl http://localhost:8000/api/drift | jq
 ```
 
 - Strategy ranking: active strategy should be near top by `total_pnl`
@@ -226,6 +227,12 @@ curl http://localhost:8000/api/risk | jq
   `slippage`, etc.); `sizing_trace` confirms the opt-in shrinkage
   multipliers (capital efficiency, Bayesian, Kelly) are firing as
   configured rather than silently no-op'ing
+- `/api/drift`: `realisation_ratio` is realised PnL ÷ predicted PnL
+  (in dollars) over the last `window` (default 100) closed trades.
+  Healthy strategy converges to ≈1.0; a ratio that drifts down over
+  weeks signals model decay — **investigate before adding capital**.
+  Cold-start (`< min_samples` edge-tagged trades) is fail-safe so
+  early-life noise doesn't trigger false alerts
 
 ### Alerts (not yet implemented — known gap)
 

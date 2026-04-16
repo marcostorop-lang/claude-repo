@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Database
-from .routes import config, logs, markets, overview, performance, positions, risk, semantic, strategies, trades
+from .routes import config, drift, logs, markets, overview, performance, positions, risk, semantic, strategies, trades
 
 _DB_PATH = os.getenv("SQLITE_DB_PATH", "polymarket_bot.db")
 _LOG_FILE = os.getenv("LOG_FILE", "bot.log")
@@ -59,6 +59,7 @@ app.include_router(logs.router, prefix="/api")
 app.include_router(config.router, prefix="/api")
 app.include_router(semantic.router, prefix="/api")
 app.include_router(risk.router, prefix="/api")
+app.include_router(drift.router, prefix="/api")
 
 
 @app.get("/api/health")
