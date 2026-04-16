@@ -213,12 +213,19 @@ curl http://localhost:8000/api/performance | jq
 ```bash
 curl http://localhost:8000/api/strategies | jq
 curl http://localhost:8000/api/semantic/calibration?days=7 | jq
+curl http://localhost:8000/api/risk | jq
 ```
 
 - Strategy ranking: active strategy should be near top by `total_pnl`
   *or* have a defensible story for why not
 - Semantic calibration `realisation_ratio` by method: structural should
   be > 0.7; textual/temporal ratios below 0.5 mean raise thresholds
+- `/api/risk`: `latest.var_95` / `cvar_95` should track open exposure
+  monotonically; `rejections.by_bucket` shows *why* trades are being
+  blocked (`circuit_breaker`, `temporal_filter`, `volatility`,
+  `slippage`, etc.); `sizing_trace` confirms the opt-in shrinkage
+  multipliers (capital efficiency, Bayesian, Kelly) are firing as
+  configured rather than silently no-op'ing
 
 ### Alerts (not yet implemented — known gap)
 
