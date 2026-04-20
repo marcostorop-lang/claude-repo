@@ -56,6 +56,9 @@ class RiskManager:
         # refuse a BUY whose cost exceeds wallet USDC.  ``None`` =>
         # feature off (paper mode never builds one).
         self.wallet_balance_provider = None
+        # Optional first-N live-trades autopause gate (see
+        # ``src/risk/live_autopause.py``).  ``None`` => feature off.
+        self.live_autopause_gate = None
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -467,6 +470,19 @@ class RiskManager:
             verdict_w = self.wallet_balance_provider.check_can_afford(cost_usd)
             if not verdict_w.allowed:
                 return RiskVerdict(False, 0.0, verdict_w.reason)
+
+        # --- First-N live-trades autopause gate ---
+        # Refuse BUYs once the operator-defined threshold of live fills
+        # has been executed, until an ack file is dropped in the working
+        # directory.  SELLs are never gated so a paused bot can still
+        # close whatever it opened.
+        if (
+            signal.action == Action.BUY
+            and self.live_autopause_gate is not None
+        ):
+            verdict_ap = self.live_autopause_gate.check_buy_allowed()
+            if not verdict_ap.allowed:
+                return RiskVerdict(False, 0.0, verdict_ap.reason)
 
         return RiskVerdict(True, size, "Risk check passed.")
 

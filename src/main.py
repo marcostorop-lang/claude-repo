@@ -207,6 +207,36 @@ def run_loop(cfg: Config) -> None:
         except Exception:
             logger.exception("Failed to build wallet balance provider — running without.")
 
+    # Optional first-N live-trades autopause gate.  Only armed in live
+    # mode when the threshold is positive.  Seeds the count from the
+    # existing trades table so restarts don't reset the counter and
+    # give the operator another "free" batch of unverified fills.
+    if cfg.is_live and cfg.live_trade_autopause_threshold > 0:
+        try:
+            from src.risk.live_autopause import LiveTradeAutopauseGate
+            initial_count = 0
+            try:
+                cur = store._conn.execute(
+                    "SELECT COUNT(*) FROM trades "
+                    "WHERE mode = 'live' AND side = 'BUY'"
+                )
+                row = cur.fetchone()
+                initial_count = int(row[0]) if row is not None else 0
+            except Exception:
+                logger.debug("autopause: seed from DB failed", exc_info=True)
+            risk_mgr.live_autopause_gate = LiveTradeAutopauseGate(
+                threshold=cfg.live_trade_autopause_threshold,
+                ack_file=cfg.live_trade_autopause_ack_file,
+                initial_count=initial_count,
+            )
+            logger.info(
+                "Live-trade autopause armed: %d/%d BUYs, ack file=%r.",
+                initial_count, cfg.live_trade_autopause_threshold,
+                cfg.live_trade_autopause_ack_file,
+            )
+        except Exception:
+            logger.exception("Failed to build live-trade autopause gate — running without.")
+
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)
@@ -1167,6 +1197,10 @@ def _tick(
 
         if result.success and sig.action == Action.BUY:
             trades_executed += 1
+            # Tick the first-N live-trades autopause counter as soon as
+            # a live BUY fills.  No-op in paper or when the gate is off.
+            if result.mode == "live" and risk_mgr.live_autopause_gate is not None:
+                risk_mgr.live_autopause_gate.record_live_fill("BUY")
             # Use actual filled size (may be partial if book depth < requested)
             actual_size = result.filled_size if result.filled_size > 0 else verdict.adjusted_size
             actual_fill = result.fill_price if result.fill_price > 0 else exec_price

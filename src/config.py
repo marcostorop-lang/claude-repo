@@ -515,6 +515,17 @@ class Config:
         default_factory=lambda: _env_float("POSITION_RECONCILIATION_TOLERANCE_SHARES", 0.01)
     )
 
+    # -- First-N live-trades autopause ------------------------------------------
+    # Block BUYs after this many live fills until the operator touches
+    # the ack file.  0 = disabled (back-compat).  Paper mode is a no-op
+    # regardless.  See ``src/risk/live_autopause.py``.
+    live_trade_autopause_threshold: int = field(
+        default_factory=lambda: _env_int("LIVE_TRADE_AUTOPAUSE_THRESHOLD", 0)
+    )
+    live_trade_autopause_ack_file: str = field(
+        default_factory=lambda: _env("LIVE_TRADE_AUTOPAUSE_ACK_FILE", "live_trades_acknowledged.ack")
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

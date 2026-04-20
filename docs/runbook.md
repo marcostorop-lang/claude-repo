@@ -51,6 +51,8 @@
 | `POSITION_RECONCILIATION_ENABLED` | `false` | Live-mode only: periodically compare tracked positions vs on-chain shares |
 | `POSITION_RECONCILIATION_INTERVAL_MINUTES` | `60` | How often the sweep runs |
 | `POSITION_RECONCILIATION_TOLERANCE_SHARES` | `0.01` | Divergences ≤ this are ignored (rounding / 1e-6 noise) |
+| `LIVE_TRADE_AUTOPAUSE_THRESHOLD` | `0` | >0 = block new live BUYs after N fills until operator acks |
+| `LIVE_TRADE_AUTOPAUSE_ACK_FILE` | `live_trades_acknowledged.ack` | Touch this file to resume after the threshold is reached |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -167,6 +169,18 @@ kinds fire:
 
 The sweeper **never mutates portfolio state** — its job is to make
 drift visible, not to paper over it.
+
+### First-N live-trades autopause
+
+Set ``LIVE_TRADE_AUTOPAUSE_THRESHOLD=N`` (e.g. 3) the first time you
+cross to live so the bot refuses new BUYs after the N-th fill. Manually
+verify each of the first N orders on Polymarket's UI — price,
+size, wallet debit, alert — then touch
+``LIVE_TRADE_AUTOPAUSE_ACK_FILE`` (default:
+``live_trades_acknowledged.ack``) to resume. SELLs are never gated:
+a paused bot can always close whatever it has open. The counter is
+seeded from the ``trades`` table on startup so a restart doesn't
+quietly reset the brake.
 
 ### Stage 0 — paper only, default strategy
 
