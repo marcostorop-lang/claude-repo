@@ -347,6 +347,13 @@ class Config:
     alert_max_per_minute: int = field(
         default_factory=lambda: _env_int("ALERT_MAX_PER_MINUTE", 20)
     )
+    # Webhook-specific severity threshold.  File sink always captures
+    # everything (local JSONL is free); the webhook drops anything
+    # below this level so Slack isn't spammed with tick noise.
+    # Valid: "info", "warning", "critical".
+    alert_webhook_min_severity: str = field(
+        default_factory=lambda: _env("ALERT_WEBHOOK_MIN_SEVERITY", "warning")
+    )
 
     # -- Auto-settlement of resolved markets (opt-in) --------------------------
     # When a Polymarket market resolves, each outcome token converges to

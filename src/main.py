@@ -1621,5 +1621,45 @@ def cmd_preflight(skip_network: bool):
         sys.exit(1)
 
 
+@cli.command("test-alerts")
+@click.option("--severity", type=click.Choice(["info", "warning", "critical", "all"]),
+              default="all", help="Fire alerts at this severity (or all three).")
+def cmd_test_alerts(severity: str):
+    """Fire test alerts through every configured sink.
+
+    Use this *before* flipping live-trading flags to verify that your
+    Slack / Discord webhook is reachable and that the file sink is
+    writing where you expect.  It dispatches real alerts through the
+    manager (respecting dedupe + rate limits), so a second run inside
+    the dedupe window will silently no-op — that's the real behaviour.
+    """
+    from src.utils.alerts import build_from_config
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    mgr = build_from_config(cfg)
+    if not mgr.sinks:
+        click.echo("No alert sinks configured. Set ALERT_LOG_FILE or "
+                   "ALERT_WEBHOOK_URL, then retry.")
+        sys.exit(1)
+    click.echo(f"Alert manager has {len(mgr.sinks)} sink(s) configured.")
+    levels = ["info", "warning", "critical"] if severity == "all" else [severity]
+    sent = 0
+    for lvl in levels:
+        ok = mgr.notify(
+            lvl,
+            f"test-alerts {lvl} probe",
+            {
+                "source": "src.main.test-alerts",
+                "trading_mode": cfg.trading_mode,
+                "note": "This is a synthetic alert. No trading action was taken.",
+            },
+        )
+        click.echo(f"  {lvl:<8} -> {'delivered' if ok else 'dropped (dedupe/rate-limit)'}")
+        if ok:
+            sent += 1
+    click.echo(f"Fired {sent}/{len(levels)} alert(s). "
+               "Check your Slack/Discord channel and the file sink.")
+
+
 if __name__ == "__main__":
     cli()

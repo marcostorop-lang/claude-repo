@@ -53,6 +53,7 @@
 | `POSITION_RECONCILIATION_TOLERANCE_SHARES` | `0.01` | Divergences ≤ this are ignored (rounding / 1e-6 noise) |
 | `LIVE_TRADE_AUTOPAUSE_THRESHOLD` | `0` | >0 = block new live BUYs after N fills until operator acks |
 | `LIVE_TRADE_AUTOPAUSE_ACK_FILE` | `live_trades_acknowledged.ack` | Touch this file to resume after the threshold is reached |
+| `ALERT_WEBHOOK_MIN_SEVERITY` | `warning` | `info` \| `warning` \| `critical` — min level forwarded to webhook |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -135,6 +136,22 @@ reachability, and (in live mode) wallet balance ≥ MAX_TOTAL_EXPOSURE.
 Exits non-zero if any check FAILs — wire it into your deploy script.
 
 Use `--skip-network` in CI environments without outbound HTTPS.
+
+### Verifying alert transport — `test-alerts`
+
+Before live trading, verify your alert pipeline end-to-end:
+
+```bash
+python -m src.main test-alerts
+```
+
+Fires one info + one warning + one critical through every configured
+sink (file + webhook). A second run inside the dedupe window is a
+silent no-op — that's real behaviour, not a bug. The file sink
+(``ALERT_LOG_FILE``) captures everything; the webhook
+(``ALERT_WEBHOOK_URL``) only forwards alerts at or above
+``ALERT_WEBHOOK_MIN_SEVERITY`` (default ``warning``) so operational
+noise doesn't drown out paging events.
 
 ### Runtime wallet gate
 

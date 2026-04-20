@@ -182,3 +182,63 @@ class TestBuildFromConfig:
         assert len(mgr.sinks) == 1
         mgr.notify("info", "hi")
         assert (tmp_path / "a.jsonl").exists()
+
+
+class TestWebhookSeverityFilter:
+    def test_drops_below_threshold(self, monkeypatch):
+        pytest.importorskip("requests")
+        import requests
+
+        calls = []
+
+        def fake_post(url, json, timeout):
+            calls.append(1)
+            class R:
+                status_code = 200
+            return R()
+
+        monkeypatch.setattr(requests, "post", fake_post)
+        sink = WebhookAlertSink("http://example.invalid/hook", min_severity="warning")
+        sink.emit(Alert(severity="info", subject="noise", detail={}))
+        assert calls == []  # info < warning → dropped
+        sink.emit(Alert(severity="warning", subject="alert", detail={}))
+        sink.emit(Alert(severity="critical", subject="page", detail={}))
+        assert len(calls) == 2
+
+    def test_default_is_info_passes_all(self, monkeypatch):
+        pytest.importorskip("requests")
+        import requests
+        calls = []
+        def fake_post(url, json, timeout):
+            calls.append(1)
+            class R:
+                status_code = 200
+            return R()
+        monkeypatch.setattr(requests, "post", fake_post)
+        sink = WebhookAlertSink("http://example.invalid/hook")
+        for lvl in ("info", "warning", "critical"):
+            sink.emit(Alert(severity=lvl, subject="s", detail={}))
+        assert len(calls) == 3
+
+    def test_factory_honours_config_min_severity(self, monkeypatch):
+        pytest.importorskip("requests")
+        import requests
+        calls = []
+        def fake_post(url, json, timeout):
+            calls.append(json["text"])
+            class R:
+                status_code = 200
+            return R()
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        class Cfg:
+            alert_webhook_url = "http://example.invalid/hook"
+            alert_webhook_min_severity = "critical"
+
+        mgr = build_from_config(Cfg())
+        mgr.notify("info", "t1")
+        mgr.notify("warning", "t2")
+        mgr.notify("critical", "t3")
+        # Only critical should have reached the webhook.
+        assert len(calls) == 1
+        assert "t3" in calls[0]

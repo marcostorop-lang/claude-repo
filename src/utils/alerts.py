@@ -87,6 +87,16 @@ class FileAlertSink:
             logger.exception("FileAlertSink: failed to write to %s", self.path)
 
 
+_SEVERITY_ORDER = {"info": 0, "warning": 1, "critical": 2}
+
+
+def _meets_severity(level: str, threshold: str) -> bool:
+    """True iff ``level`` is at least as severe as ``threshold``."""
+    lv = _SEVERITY_ORDER.get((level or "").lower(), 0)
+    th = _SEVERITY_ORDER.get((threshold or "info").lower(), 0)
+    return lv >= th
+
+
 class WebhookAlertSink:
     """POST ``{"text": subject, "attachments": [...]}`` to a webhook.
 
@@ -94,13 +104,25 @@ class WebhookAlertSink:
     ``content`` field too; we include both for convenience).  The
     request library is imported lazily so the bot has no hard dep on
     ``requests`` if the webhook isn't used.
+
+    ``min_severity`` gates delivery so an always-on-info-level bot
+    doesn't spam Slack with every tick-level notice.  Defaults to
+    ``"info"`` (no filtering) for back-compat.
     """
 
-    def __init__(self, url: str, timeout_s: float = 3.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout_s: float = 3.0,
+        min_severity: str = "info",
+    ) -> None:
         self.url = url
         self.timeout_s = timeout_s
+        self.min_severity = min_severity
 
     def emit(self, alert: Alert) -> None:
+        if not _meets_severity(alert.severity, self.min_severity):
+            return
         try:
             import requests  # lazy — only needed if the sink is active
         except ImportError:
@@ -243,6 +265,7 @@ def build_from_config(cfg) -> AlertManager:
 
     url = getattr(cfg, "alert_webhook_url", "")
     if url:
-        mgr.add(WebhookAlertSink(url))
+        min_sev = getattr(cfg, "alert_webhook_min_severity", "info")
+        mgr.add(WebhookAlertSink(url, min_severity=min_sev))
 
     return mgr
