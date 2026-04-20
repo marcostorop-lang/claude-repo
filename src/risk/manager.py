@@ -352,6 +352,30 @@ class RiskManager:
                 # Fail open — never let a loader bug freeze trading.
                 logger.exception("Volatility filter errored — allowing trade.")
 
+        # --- Anti-pump filter ---
+        # Reject BUYs into tokens that moved sharply in recent ticks.
+        # Cold-start safe: insufficient history → allow.
+        if (
+            signal.action == Action.BUY
+            and getattr(self.cfg, "anti_pump_enabled", False)
+            and self.get_price_history is not None
+        ):
+            try:
+                from src.risk.anti_pump import check_pump
+                prices = self.get_price_history(
+                    token_id,
+                    limit=self.cfg.anti_pump_window_points + 1,
+                ) or []
+                pump_v = check_pump(
+                    prices,
+                    window_points=self.cfg.anti_pump_window_points,
+                    threshold=self.cfg.anti_pump_threshold,
+                )
+                if pump_v.blocked:
+                    return RiskVerdict(False, 0.0, f"Anti-pump: {pump_v.reason}")
+            except Exception:
+                logger.exception("Anti-pump filter errored — allowing trade.")
+
         # --- Duplicate position prevention ---
         if signal.action == Action.BUY and token_id in self.portfolio.positions:
             return RiskVerdict(False, 0.0, "Already have an open position for this token.")

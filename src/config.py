@@ -572,6 +572,20 @@ class Config:
         default_factory=lambda: _env_bool("DAILY_SUMMARY_ENABLED", False)
     )
 
+    # -- Anti-pump filter (opt-in) ----------------------------------------------
+    # Reject BUYs when the token's recent absolute return exceeds a
+    # threshold — catching news pumps and thin-book spikes before the
+    # bot buys the top.  SELLs never gated.  Cold-start safe.
+    anti_pump_enabled: bool = field(
+        default_factory=lambda: _env_bool("ANTI_PUMP_ENABLED", False)
+    )
+    anti_pump_threshold: float = field(
+        default_factory=lambda: _env_float("ANTI_PUMP_THRESHOLD", 0.10)
+    )
+    anti_pump_window_points: int = field(
+        default_factory=lambda: _env_int("ANTI_PUMP_WINDOW_POINTS", 10)
+    )
+
     # -- Latency telemetry (opt-in) --------------------------------------------
     # Rolling recorder for signal→submit→fill intervals.  Fires a
     # warning alert when the latest end-to-end latency exceeds the
