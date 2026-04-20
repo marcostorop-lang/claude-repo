@@ -12,6 +12,7 @@ import {
   Telescope,
   ScrollText,
   Settings,
+  ShieldAlert,
 } from "lucide-react";
 
 const NAV = [
@@ -22,6 +23,7 @@ const NAV = [
   { href: "/markets", label: "Markets", icon: Store },
   { href: "/strategies", label: "Strategies", icon: Brain },
   { href: "/semantic", label: "Semantic", icon: Telescope },
+  { href: "/risk", label: "Risk", icon: ShieldAlert },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/config", label: "Config", icon: Settings },
 ];

@@ -529,3 +529,168 @@ export function getSemanticCalibration(
     warnings,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Risk & Observability
+// ---------------------------------------------------------------------------
+
+export type RiskRejection = {
+  timestamp: string;
+  token_id: string;
+  action: string;
+  reason: string;
+  strategy: string;
+  confidence: number;
+};
+
+export function getRiskRejections(limit = 50): RiskRejection[] {
+  const rows = query(
+    `SELECT timestamp, token_id, action, reason, strategy, confidence
+     FROM decision_log
+     WHERE action = 'RISK_REJECTED'
+     ORDER BY id DESC LIMIT ?`,
+    [limit],
+  );
+  return rows.map((r) => ({
+    timestamp: r.timestamp as string,
+    token_id: r.token_id as string,
+    action: r.action as string,
+    reason: r.reason as string,
+    strategy: (r.strategy as string) || "",
+    confidence: (r.confidence as number) || 0,
+  }));
+}
+
+export type FeatureAttr = {
+  feature: string;
+  n_total: number;
+  cohens_d: number;
+  win_mean: number;
+  loss_mean: number;
+  winrate_above_median: number;
+  winrate_below_median: number;
+  overall_winrate: number;
+};
+
+export function getFeatureAttribution(minSamples = 20): {
+  total_trades: number;
+  overall_winrate: number;
+  features: FeatureAttr[];
+} {
+  const empty = { total_trades: 0, overall_winrate: 0, features: [] as FeatureAttr[] };
+  try {
+    const rows = query(
+      `SELECT pnl, features FROM calibration WHERE exit_timestamp IS NOT NULL ORDER BY id ASC`,
+    );
+    if (rows.length < minSamples) {
+      return { total_trades: rows.length, overall_winrate: 0, features: [] };
+    }
+
+    const wins: Array<Record<string, unknown>> = [];
+    const losses: Array<Record<string, unknown>> = [];
+
+    let winCount = 0;
+    for (const r of rows) {
+      const pnl = r.pnl as number;
+      if (pnl == null) continue;
+      let feats: Record<string, unknown> = {};
+      try {
+        const raw = r.features as string;
+        feats = raw ? JSON.parse(raw) : {};
+      } catch { feats = {}; }
+      if (pnl > 0) { wins.push(feats); winCount++; }
+      else { losses.push(feats); }
+    }
+
+    const total = wins.length + losses.length;
+    if (total < minSamples) return { total_trades: total, overall_winrate: 0, features: [] };
+    const overallWr = winCount / total;
+
+    const allKeys = new Set<string>();
+    for (const f of [...wins, ...losses]) {
+      for (const k of Object.keys(f)) {
+        const v = f[k];
+        if (typeof v === "number" && isFinite(v)) allKeys.add(k);
+      }
+    }
+
+    const features: FeatureAttr[] = [];
+    for (const key of Array.from(allKeys).sort()) {
+      const wv: number[] = [];
+      const lv: number[] = [];
+      for (const f of wins) {
+        const v = f[key];
+        if (typeof v === "number" && isFinite(v)) wv.push(v);
+      }
+      for (const f of losses) {
+        const v = f[key];
+        if (typeof v === "number" && isFinite(v)) lv.push(v);
+      }
+      const nTotal = wv.length + lv.length;
+      if (nTotal < 10) continue;
+
+      const wMean = wv.length ? wv.reduce((a, b) => a + b, 0) / wv.length : 0;
+      const lMean = lv.length ? lv.reduce((a, b) => a + b, 0) / lv.length : 0;
+      const all = [...wv, ...lv];
+      const allMean = all.reduce((a, b) => a + b, 0) / all.length;
+      const variance = all.reduce((a, b) => a + (b - allMean) ** 2, 0) / Math.max(all.length - 1, 1);
+      const sd = Math.sqrt(variance);
+      const d = sd > 0 ? (wMean - lMean) / sd : 0;
+
+      all.sort((a, b) => a - b);
+      const med = all[Math.floor(all.length / 2)];
+      let aboveWin = 0, aboveTotal = 0, belowWin = 0, belowTotal = 0;
+      for (const v of wv) { if (v >= med) { aboveWin++; aboveTotal++; } else { belowWin++; belowTotal++; } }
+      for (const v of lv) { if (v >= med) aboveTotal++; else belowTotal++; }
+
+      features.push({
+        feature: key, n_total: nTotal, cohens_d: +d.toFixed(4),
+        win_mean: +wMean.toFixed(6), loss_mean: +lMean.toFixed(6),
+        winrate_above_median: aboveTotal ? +(aboveWin / aboveTotal).toFixed(4) : 0,
+        winrate_below_median: belowTotal ? +(belowWin / belowTotal).toFixed(4) : 0,
+        overall_winrate: +overallWr.toFixed(4),
+      });
+    }
+    features.sort((a, b) => Math.abs(b.cohens_d) - Math.abs(a.cohens_d));
+    return { total_trades: total, overall_winrate: +overallWr.toFixed(4), features };
+  } catch {
+    return empty;
+  }
+}
+
+export type SlippageOverview = {
+  n_entries: number;
+  avg_predicted_bps: number;
+  avg_realised_bps: number;
+  avg_drift_bps: number;
+};
+
+export function getSlippageOverview(limit = 500): SlippageOverview {
+  const empty: SlippageOverview = { n_entries: 0, avg_predicted_bps: 0, avg_realised_bps: 0, avg_drift_bps: 0 };
+  try {
+    const rows = query(
+      `SELECT features FROM decision_log WHERE action LIKE 'ENTRY_%' ORDER BY id DESC LIMIT ?`,
+      [limit],
+    );
+    let predicted = 0, realised = 0, count = 0;
+    for (const r of rows) {
+      let f: Record<string, unknown> = {};
+      try { f = JSON.parse(r.features as string || "{}"); } catch { continue; }
+      const pred = f.slippage_pct as number;
+      const mid = f.midpoint_at_entry as number;
+      const fill = f.fill_price as number;
+      if (pred == null || !mid || !fill) continue;
+      const real = Math.abs((fill - mid) / mid);
+      predicted += Math.abs(pred) * 10000;
+      realised += real * 10000;
+      count++;
+    }
+    if (!count) return empty;
+    return {
+      n_entries: count,
+      avg_predicted_bps: +(predicted / count).toFixed(2),
+      avg_realised_bps: +(realised / count).toFixed(2),
+      avg_drift_bps: +((realised - predicted) / count).toFixed(2),
+    };
+  } catch { return empty; }
+}
