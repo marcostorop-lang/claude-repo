@@ -137,6 +137,21 @@ Exits non-zero if any check FAILs — wire it into your deploy script.
 
 Use `--skip-network` in CI environments without outbound HTTPS.
 
+### Morning retrospective — `daily-summary`
+
+```bash
+python -m src.main daily-summary           # yesterday UTC
+python -m src.main daily-summary --date 2026-04-15
+python -m src.main daily-summary --alert   # also dispatch via sinks
+```
+
+Pure read of the SQLite DB — no network, no orders, safe to cron.
+Reports trade counts (live vs paper), realised PnL, win rate, top-3
+winners, top-3 losers. Pass ``--alert`` to route the summary through
+the alert manager at ``info`` severity; by default the webhook
+drops ``info`` (see ``ALERT_WEBHOOK_MIN_SEVERITY``), so the file sink
+captures it while Slack stays quiet unless you flip that knob.
+
 ### Verifying alert transport — `test-alerts`
 
 Before live trading, verify your alert pipeline end-to-end:

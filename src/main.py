@@ -1661,5 +1661,56 @@ def cmd_test_alerts(severity: str):
                "Check your Slack/Discord channel and the file sink.")
 
 
+@cli.command("daily-summary")
+@click.option("--date", "day_str", default="",
+              help="UTC date (YYYY-MM-DD); defaults to yesterday.")
+@click.option("--alert", is_flag=True, default=False,
+              help="Dispatch the summary through configured alert sinks.")
+def cmd_daily_summary(day_str: str, alert: bool):
+    """Print yesterday's activity: trades, PnL, winners/losers.
+
+    Safe to cron: pure read of the local SQLite DB, no network, no
+    order placement.  Pass ``--alert`` to route the summary through
+    the same alert sinks used for operational events (info severity
+    so webhook filters can route it to a separate channel).
+    """
+    from datetime import date as _date
+
+    from src.analysis.daily_summary import build_daily_summary, format_summary
+    from src.storage.sqlite_store import SQLiteStore
+    from src.utils.alerts import build_from_config
+
+    cfg = Config()
+    setup_logging(cfg.log_level)
+
+    if day_str:
+        try:
+            target_day = _date.fromisoformat(day_str)
+        except ValueError:
+            click.echo(f"Invalid --date {day_str!r}; expected YYYY-MM-DD.")
+            sys.exit(1)
+    else:
+        target_day = None  # build_daily_summary defaults to UTC yesterday
+
+    store = SQLiteStore(cfg.sqlite_db_path)
+    try:
+        trades = store.get_all_trades()
+        closed = store.get_calibration_closed()
+    finally:
+        store.close()
+
+    summary = build_daily_summary(trades, closed, day=target_day)
+    text = format_summary(summary)
+    click.echo(text)
+
+    if alert:
+        mgr = build_from_config(cfg)
+        if not mgr.sinks:
+            click.echo("\n(--alert requested but no sinks configured.)")
+        else:
+            mgr.notify("info", f"daily summary {summary.day}", summary.to_dict())
+            click.echo("\nDispatched through alert sinks.")
+
+
 if __name__ == "__main__":
     cli()
