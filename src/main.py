@@ -176,6 +176,37 @@ def run_loop(cfg: Config) -> None:
         except Exception:
             logger.exception("Failed to build BayesianCalibrator — running without.")
             risk_mgr.bayesian_calibrator = None
+    # Optional live wallet balance gate.  Built only in live mode
+    # because in paper mode the simulated balance is the source of
+    # truth.  When the SDK isn't installed the fetcher returns None
+    # and the provider stays None — the runtime check is fully
+    # opt-out via WALLET_BALANCE_CHECK_ENABLED=false.
+    if cfg.is_live and getattr(cfg, "wallet_balance_check_enabled", True):
+        try:
+            from src.risk.wallet_balance import (
+                WalletBalanceProvider, build_clob_balance_fetcher,
+            )
+            fetcher = build_clob_balance_fetcher(cfg)
+            if fetcher is not None:
+                risk_mgr.wallet_balance_provider = WalletBalanceProvider(
+                    fetcher,
+                    refresh_seconds=cfg.wallet_balance_refresh_seconds,
+                    min_buffer_usd=cfg.wallet_balance_min_buffer_usd,
+                )
+                logger.info(
+                    "Wallet balance gate enabled (refresh=%.0fs, buffer=$%.2f).",
+                    cfg.wallet_balance_refresh_seconds,
+                    cfg.wallet_balance_min_buffer_usd,
+                )
+            else:
+                logger.warning(
+                    "Live mode but wallet balance fetcher unavailable — "
+                    "runtime affordability check disabled. Verify wallet "
+                    "funding manually.",
+                )
+        except Exception:
+            logger.exception("Failed to build wallet balance provider — running without.")
+
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)

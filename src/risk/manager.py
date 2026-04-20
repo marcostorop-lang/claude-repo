@@ -51,6 +51,11 @@ class RiskManager:
         # produced the signal.  ``None`` means the feature is off; zero
         # runtime cost in that case.
         self.bayesian_calibrator = None
+        # Optional live-wallet balance provider (see
+        # ``src/risk/wallet_balance.py``).  When attached, ``check`` will
+        # refuse a BUY whose cost exceeds wallet USDC.  ``None`` =>
+        # feature off (paper mode never builds one).
+        self.wallet_balance_provider = None
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -446,6 +451,22 @@ class RiskManager:
 
         if size <= 0:
             return RiskVerdict(False, 0.0, "Effective size is zero.")
+
+        # --- Live wallet balance gate ---
+        # Belt-and-braces check: even if the exposure cap fits, refuse
+        # the order when the wallet itself can't cover the cost.  Only
+        # active in live mode (paper builds no provider).  Fail-safe:
+        # an unreadable balance allows the trade (preflight is the
+        # primary gate; this is the runtime backup).
+        if (
+            signal.action == Action.BUY
+            and self.wallet_balance_provider is not None
+            and getattr(self.cfg, "wallet_balance_check_enabled", True)
+        ):
+            cost_usd = size * price
+            verdict_w = self.wallet_balance_provider.check_can_afford(cost_usd)
+            if not verdict_w.allowed:
+                return RiskVerdict(False, 0.0, verdict_w.reason)
 
         return RiskVerdict(True, size, "Risk check passed.")
 

@@ -483,6 +483,23 @@ class Config:
         default_factory=lambda: _env_float("SIZING_CAPITAL_EFFICIENCY_MIN_FACTOR", 0.25)
     )
 
+    # -- Live wallet balance gate ----------------------------------------------
+    # Belt-and-braces runtime check: refuse a live BUY if the cost
+    # exceeds available USDC (minus a configurable buffer).  Has no
+    # effect in paper mode.  Cold/unreadable balance is fail-safe
+    # (allows the trade) — the preflight command is the authoritative
+    # pre-launch gate; this is the runtime backup that catches a
+    # mid-flight balance drop (manual withdrawal, bridge out, etc.).
+    wallet_balance_check_enabled: bool = field(
+        default_factory=lambda: _env_bool("WALLET_BALANCE_CHECK_ENABLED", True)
+    )
+    wallet_balance_refresh_seconds: float = field(
+        default_factory=lambda: _env_float("WALLET_BALANCE_REFRESH_SECONDS", 60.0)
+    )
+    wallet_balance_min_buffer_usd: float = field(
+        default_factory=lambda: _env_float("WALLET_BALANCE_MIN_BUFFER_USD", 0.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

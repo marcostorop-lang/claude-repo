@@ -45,6 +45,9 @@
 | `SIZING_CAPITAL_EFFICIENCY_ENABLED` | `false` | Shrink size on long-dated markets (capital-cost penalty) |
 | `SIZING_CAPITAL_EFFICIENCY_TARGET_DAYS` | `14.0` | Markets ≤ this many days are unscaled |
 | `SIZING_CAPITAL_EFFICIENCY_MIN_FACTOR` | `0.25` | Floor on the shrinkage factor for very long-dated markets |
+| `WALLET_BALANCE_CHECK_ENABLED` | `true` | Runtime gate: refuse BUYs whose cost exceeds live USDC (live mode only) |
+| `WALLET_BALANCE_REFRESH_SECONDS` | `60` | Min seconds between upstream balance fetches (cache TTL) |
+| `WALLET_BALANCE_MIN_BUFFER_USD` | `0` | Keep this much USDC unspendable (fee cushion / safety margin) |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -127,6 +130,18 @@ reachability, and (in live mode) wallet balance ≥ MAX_TOTAL_EXPOSURE.
 Exits non-zero if any check FAILs — wire it into your deploy script.
 
 Use `--skip-network` in CI environments without outbound HTTPS.
+
+### Runtime wallet gate
+
+Preflight is the authoritative launch gate, but in live mode the risk
+manager also consults a cached USDC-balance probe at trade time. If
+wallet balance was drained between preflight and tick-time (another
+process withdrew, cross-market fees accumulated), BUYs are refused with
+`Insufficient wallet: need $X, available $Y`. Cache TTL is
+`WALLET_BALANCE_REFRESH_SECONDS` (default 60s), buffer cushion is
+`WALLET_BALANCE_MIN_BUFFER_USD`. Fail-safe: if the SDK isn't installed
+or the RPC blips, the runtime gate allows through and logs the cause —
+it is a belt-and-braces check, not a replacement for preflight.
 
 ### Stage 0 — paper only, default strategy
 
