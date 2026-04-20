@@ -500,6 +500,21 @@ class Config:
         default_factory=lambda: _env_float("WALLET_BALANCE_MIN_BUFFER_USD", 0.0)
     )
 
+    # -- Position reconciliation ------------------------------------------------
+    # Periodically compares ``PortfolioTracker.positions`` against the
+    # CLOB-reported wallet balance for each tracked token, flagging
+    # divergences above a tolerance.  Report-only (never mutates state).
+    # Paper mode is always a no-op.  See ``src/portfolio/reconciliation.py``.
+    position_reconciliation_enabled: bool = field(
+        default_factory=lambda: _env_bool("POSITION_RECONCILIATION_ENABLED", False)
+    )
+    position_reconciliation_interval_minutes: float = field(
+        default_factory=lambda: _env_float("POSITION_RECONCILIATION_INTERVAL_MINUTES", 60.0)
+    )
+    position_reconciliation_tolerance_shares: float = field(
+        default_factory=lambda: _env_float("POSITION_RECONCILIATION_TOLERANCE_SHARES", 0.01)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

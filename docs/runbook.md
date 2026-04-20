@@ -48,6 +48,9 @@
 | `WALLET_BALANCE_CHECK_ENABLED` | `true` | Runtime gate: refuse BUYs whose cost exceeds live USDC (live mode only) |
 | `WALLET_BALANCE_REFRESH_SECONDS` | `60` | Min seconds between upstream balance fetches (cache TTL) |
 | `WALLET_BALANCE_MIN_BUFFER_USD` | `0` | Keep this much USDC unspendable (fee cushion / safety margin) |
+| `POSITION_RECONCILIATION_ENABLED` | `false` | Live-mode only: periodically compare tracked positions vs on-chain shares |
+| `POSITION_RECONCILIATION_INTERVAL_MINUTES` | `60` | How often the sweep runs |
+| `POSITION_RECONCILIATION_TOLERANCE_SHARES` | `0.01` | Divergences ≤ this are ignored (rounding / 1e-6 noise) |
 
 When in doubt, change nothing. The defaults have been validated against
 the full test suite and the one rule from `CLAUDE.md` is never to
@@ -142,6 +145,28 @@ process withdrew, cross-market fees accumulated), BUYs are refused with
 `WALLET_BALANCE_MIN_BUFFER_USD`. Fail-safe: if the SDK isn't installed
 or the RPC blips, the runtime gate allows through and logs the cause —
 it is a belt-and-braces check, not a replacement for preflight.
+
+### Position reconciliation (live mode)
+
+Enable ``POSITION_RECONCILIATION_ENABLED=true`` once you cross into
+live trading. Every
+``POSITION_RECONCILIATION_INTERVAL_MINUTES`` (default 60) the
+sweeper asks the CLOB for the actual ERC1155 share balance of each
+tracked token and reports any divergence larger than
+``POSITION_RECONCILIATION_TOLERANCE_SHARES`` (default 0.01). Three
+kinds fire:
+
+* **phantom_local** — tracker thinks we hold shares, chain shows
+  zero. Alerts at `critical`: most dangerous because it can drive
+  false exits. Investigate before the next BUY of that market.
+* **untracked_onchain** — chain shows shares we never booked.
+  Alerts at `warn`. Usually a manual trade or a restart water-mark
+  bug.
+* **size_mismatch** — both sides nonzero but differ by more than
+  tolerance. Alerts at `warn`.
+
+The sweeper **never mutates portfolio state** — its job is to make
+drift visible, not to paper over it.
 
 ### Stage 0 — paper only, default strategy
 

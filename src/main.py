@@ -282,6 +282,23 @@ def run_loop(cfg: Config) -> None:
     # feature is enabled.
     last_resolution_sweep = 0.0
     last_staleness_check = 0.0
+    last_reconciliation = 0.0
+
+    # Build the on-chain shares fetcher once per loop: it's a no-op in
+    # paper mode and when the SDK isn't importable.  Stored here so the
+    # periodic sweeper reuses the same closure (cheap closure over cfg).
+    reconciliation_fetcher = None
+    if cfg.position_reconciliation_enabled and cfg.is_live:
+        try:
+            from src.portfolio.reconciliation import build_clob_shares_fetcher
+            reconciliation_fetcher = build_clob_shares_fetcher(cfg)
+            if reconciliation_fetcher is None:
+                logger.warning(
+                    "Reconciliation enabled but no fetcher available — "
+                    "check py-clob-client install and credentials.",
+                )
+        except Exception:
+            logger.exception("Failed to build reconciliation fetcher.")
 
     tick_count = 0
     while not _shutdown:
@@ -382,6 +399,34 @@ def run_loop(cfg: Config) -> None:
                         )
             except Exception:
                 logger.exception("Staleness monitor crashed — continuing.")
+
+        # Periodic reconciliation sweep — compares tracked positions
+        # with on-chain shares and alerts on divergences above a
+        # tolerance.  Report-only; never mutates portfolio state.
+        if cfg.position_reconciliation_enabled and reconciliation_fetcher is not None:
+            try:
+                from src.portfolio.reconciliation import (
+                    reconcile_positions,
+                    should_run as _rc_should_run,
+                )
+                if _rc_should_run(
+                    last_reconciliation,
+                    cfg.position_reconciliation_interval_minutes,
+                    time.time(),
+                ):
+                    rc_report = reconcile_positions(
+                        portfolio, reconciliation_fetcher,
+                        tolerance_shares=cfg.position_reconciliation_tolerance_shares,
+                        alerts=alerts, metrics=metrics,
+                    )
+                    last_reconciliation = time.time()
+                    if rc_report.any_divergence:
+                        logger.warning(
+                            "Reconciliation: %d divergence(s) across %d position(s) checked.",
+                            len(rc_report.divergences), rc_report.positions_checked,
+                        )
+            except Exception:
+                logger.exception("Reconciliation sweeper crashed — continuing.")
 
         # Circuit breaker check
         if risk_mgr.is_circuit_breaker_active:
