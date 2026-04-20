@@ -284,6 +284,15 @@ class RiskManager:
                 )
             base_usd *= cap_factor
 
+        # Dry-run live cap: hard ceiling on USD notional for live orders.
+        live_cap = getattr(self.cfg, "live_trade_max_position_usd", 0.0) or 0.0
+        if live_cap > 0 and self.cfg.is_live and base_usd > live_cap:
+            logger.info(
+                "Dry-run cap: $%.2f → $%.2f (LIVE_TRADE_MAX_POSITION_USD)",
+                base_usd, live_cap,
+            )
+            base_usd = live_cap
+
         return base_usd / price
 
     # Pre-trade risk check

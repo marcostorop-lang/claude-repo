@@ -572,6 +572,16 @@ class Config:
         default_factory=lambda: _env_bool("DAILY_SUMMARY_ENABLED", False)
     )
 
+    # -- Dry-run live cap (opt-in) -----------------------------------------------
+    # When > 0 and mode is live, caps every position's USD notional at
+    # this value regardless of what sizing logic computes.  Lets the
+    # operator run live with real orders but tiny stakes until confident
+    # that execution, fees, and accounting are working correctly.
+    # 0 (default) = no cap (normal sizing applies).
+    live_trade_max_position_usd: float = field(
+        default_factory=lambda: _env_float("LIVE_TRADE_MAX_POSITION_USD", 0.0)
+    )
+
     # -- Anti-pump filter (opt-in) ----------------------------------------------
     # Reject BUYs when the token's recent absolute return exceeds a
     # threshold — catching news pumps and thin-book spikes before the
