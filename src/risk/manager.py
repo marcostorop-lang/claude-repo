@@ -59,6 +59,13 @@ class RiskManager:
         # Optional first-N live-trades autopause gate (see
         # ``src/risk/live_autopause.py``).  ``None`` => feature off.
         self.live_autopause_gate = None
+        # Regime-shift autopause.  Flipped True by the periodic
+        # detector when a coordinated market-wide move is observed;
+        # flipped back when the detector next reports calm.  Not
+        # persisted across restarts on purpose — a transient shift
+        # shouldn't halt the bot forever on the next launch.
+        self.regime_paused: bool = False
+        self.regime_pause_reason: str = ""
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -470,6 +477,16 @@ class RiskManager:
             verdict_w = self.wallet_balance_provider.check_can_afford(cost_usd)
             if not verdict_w.allowed:
                 return RiskVerdict(False, 0.0, verdict_w.reason)
+
+        # --- Regime-shift autopause ---
+        # When the detector flips ``regime_paused`` on, new BUYs are
+        # refused until the next detector run reports calm.  SELLs are
+        # allowed so positions can be closed during a shift.
+        if signal.action == Action.BUY and self.regime_paused:
+            return RiskVerdict(
+                False, 0.0,
+                f"Regime shift active — {self.regime_pause_reason}",
+            )
 
         # --- First-N live-trades autopause gate ---
         # Refuse BUYs once the operator-defined threshold of live fills

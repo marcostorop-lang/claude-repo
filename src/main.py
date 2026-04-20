@@ -285,6 +285,19 @@ def run_loop(cfg: Config) -> None:
         from src.utils.metrics import MetricsWriter
         metrics = MetricsWriter("")
 
+    # Latency telemetry — rolling tracker for signal→submit→fill intervals.
+    latency_tracker = None
+    if cfg.latency_tracking_enabled:
+        try:
+            from src.utils.latency import LatencyTracker
+            latency_tracker = LatencyTracker(window=cfg.latency_window_samples)
+            logger.info(
+                "Latency tracker enabled (window=%d, alert_threshold=%.0f ms).",
+                cfg.latency_window_samples, cfg.latency_alert_threshold_ms,
+            )
+        except Exception:
+            logger.exception("Latency tracker setup failed — running without.")
+
     mode_label = "PAPER" if cfg.is_paper else ("LIVE" if cfg.is_live else "PAPER (live not enabled)")
     logger.info("=== Bot started | mode=%s | strategy=%s | poll=%ds ===", mode_label, strategy.name, cfg.poll_interval)
     if alerts is not None and alerts.sinks:
@@ -313,6 +326,8 @@ def run_loop(cfg: Config) -> None:
     last_resolution_sweep = 0.0
     last_staleness_check = 0.0
     last_reconciliation = 0.0
+    last_regime_check = 0.0
+    last_daily_summary_day = ""  # "YYYY-MM-DD" of the most recent dispatch
 
     # Build the on-chain shares fetcher once per loop: it's a no-op in
     # paper mode and when the SDK isn't importable.  Stored here so the
@@ -458,6 +473,128 @@ def run_loop(cfg: Config) -> None:
             except Exception:
                 logger.exception("Reconciliation sweeper crashed — continuing.")
 
+        # Periodic regime-shift detector — reads recent price history
+        # for each tracked token, asks the detector whether the
+        # universe is moving together, and alerts (+ optionally
+        # auto-pauses BUYs) when a shift is observed.
+        if cfg.regime_detector_enabled:
+            try:
+                from src.risk.regime import (
+                    detect_regime_shift, returns_from_price_history,
+                )
+                # Reuse the staleness sweeper's "should_run" shape.
+                now = time.time()
+                if (
+                    cfg.regime_detector_interval_minutes > 0
+                    and (
+                        last_regime_check <= 0
+                        or (now - last_regime_check)
+                        >= cfg.regime_detector_interval_minutes * 60.0
+                    )
+                ):
+                    # Only look at tokens the bot actually tracked this
+                    # session (open positions + recent price pushes).
+                    active = {p.token_id for p in portfolio.positions.values()}
+                    # Also include tokens that have price history — they
+                    # were seen at least once and form the "universe".
+                    cur = store._conn.execute(
+                        "SELECT DISTINCT token_id FROM price_history "
+                        "ORDER BY id DESC LIMIT 200"
+                    )
+                    for row in cur.fetchall():
+                        active.add(row["token_id"])
+
+                    histories = {
+                        tok: store.get_price_history(
+                            tok, limit=cfg.regime_lookback_points + 1,
+                        )
+                        for tok in active
+                    }
+                    rets = returns_from_price_history(
+                        histories, lookback_points=cfg.regime_lookback_points,
+                    )
+                    verdict = detect_regime_shift(
+                        rets,
+                        move_threshold=cfg.regime_move_threshold,
+                        fraction_threshold=cfg.regime_fraction_threshold,
+                        min_universe=cfg.regime_min_universe,
+                    )
+                    last_regime_check = now
+
+                    if verdict.shift_detected:
+                        if alerts is not None:
+                            alerts.warn(
+                                "regime shift detected",
+                                universe=verdict.universe_size,
+                                big_move_fraction=round(verdict.big_move_fraction, 4),
+                                directional_bias=round(verdict.directional_bias, 4),
+                                reason=verdict.reason,
+                            )
+                        if cfg.regime_auto_pause_on_shift and not risk_mgr.regime_paused:
+                            risk_mgr.regime_paused = True
+                            risk_mgr.regime_pause_reason = verdict.reason
+                            logger.warning(
+                                "Regime auto-pause engaged: %s", verdict.reason,
+                            )
+                    else:
+                        if risk_mgr.regime_paused:
+                            logger.info(
+                                "Regime auto-pause released: %s", verdict.reason,
+                            )
+                            if alerts is not None:
+                                alerts.info(
+                                    "regime auto-pause released",
+                                    reason=verdict.reason,
+                                )
+                        risk_mgr.regime_paused = False
+                        risk_mgr.regime_pause_reason = ""
+                    if metrics.enabled:
+                        metrics.emit(
+                            "regime_check",
+                            shift=verdict.shift_detected,
+                            universe=verdict.universe_size,
+                            big_move_fraction=verdict.big_move_fraction,
+                            directional_bias=verdict.directional_bias,
+                        )
+            except Exception:
+                logger.exception("Regime detector crashed — continuing.")
+
+        # Daily summary scheduler — fires once per UTC day, shortly
+        # after midnight, covering the *previous* day.  Idempotent
+        # (tracked in-memory), no backfill on restart.
+        if cfg.daily_summary_enabled:
+            try:
+                from datetime import datetime as _dt
+                from datetime import timedelta as _td
+                from datetime import timezone as _tz
+
+                from src.analysis.daily_summary import (
+                    build_daily_summary, format_summary,
+                )
+
+                now_utc = _dt.now(_tz.utc)
+                today_iso = now_utc.date().isoformat()
+                # Fire only after 00:05 UTC to avoid race with in-flight writes
+                # from the boundary second, and only once per day.
+                if (
+                    now_utc.hour > 0 or now_utc.minute >= 5
+                ) and last_daily_summary_day != today_iso:
+                    yday = (now_utc - _td(days=1)).date()
+                    trades_all = store.get_all_trades()
+                    cal_all = store.get_calibration_closed()
+                    summary = build_daily_summary(trades_all, cal_all, day=yday)
+                    logger.info("Daily summary:\n%s", format_summary(summary))
+                    if alerts is not None:
+                        alerts.info(
+                            f"daily summary {summary.day}",
+                            **summary.to_dict(),
+                        )
+                    if metrics.enabled:
+                        metrics.emit("daily_summary", **summary.to_dict())
+                    last_daily_summary_day = today_iso
+            except Exception:
+                logger.exception("Daily summary scheduler crashed — continuing.")
+
         # Circuit breaker check
         if risk_mgr.is_circuit_breaker_active:
             logger.warning("Circuit breaker active (daily loss $%.2f). Skipping tick, monitoring only.", abs(risk_mgr.daily_pnl))
@@ -474,7 +611,7 @@ def run_loop(cfg: Config) -> None:
                 _tick(
                     market_svc, strategy, risk_mgr, executor, portfolio,
                     store, client, cfg, semantic_smoother=semantic_smoother,
-                    metrics=metrics,
+                    metrics=metrics, latency_tracker=latency_tracker,
                 )
             except Exception as exc:
                 logger.exception("Error in bot tick — will retry next cycle.")
@@ -654,6 +791,7 @@ def _tick(
     *,
     semantic_smoother=None,
     metrics=None,
+    latency_tracker=None,
 ) -> None:
     """One iteration of the bot loop."""
 
@@ -859,6 +997,7 @@ def _tick(
 
         history = store.get_price_history(snap.token_id)
         sig = strategy.evaluate(snap, history)
+        t_signal_ts = time.time()
 
         if sig.action == Action.HOLD:
             # Split HOLD reasons for diagnostics — warmup vs no-signal
@@ -1169,7 +1308,21 @@ def _tick(
             max_fillable_size=max_fillable_size,
             order_type=order_type,
         )
+        t_submit_ts = time.time()
         result = executor.execute(order)
+        t_fill_ts = time.time()
+
+        if latency_tracker is not None and result.success:
+            latency_tracker.observe(
+                t_signal=t_signal_ts, t_submit=t_submit_ts, t_fill=t_fill_ts,
+            )
+            from src.utils.latency import should_alert_latency
+            latest_ms = latency_tracker.latest_signal_to_fill_ms()
+            if should_alert_latency(latest_ms, threshold_ms=cfg.latency_alert_threshold_ms):
+                logger.warning(
+                    "Latency alert: signal→fill %.0f ms (threshold %.0f ms)",
+                    latest_ms, cfg.latency_alert_threshold_ms,
+                )
 
         # Record maker-miss as a decision so operators can see the signal
         # fired and a passive quote was posted but nobody took it.  No

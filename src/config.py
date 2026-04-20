@@ -533,6 +533,59 @@ class Config:
         default_factory=lambda: _env("LIVE_TRADE_AUTOPAUSE_ACK_FILE", "live_trades_acknowledged.ack")
     )
 
+    # -- Regime-shift detector (correlated market moves) -----------------------
+    # When enabled, the loop periodically asks the detector whether
+    # the recent price history of *all tracked tokens* shows a
+    # coordinated move (classic election-night / news-flash scenario).
+    # Report-only by default — alerts fire, operators decide.  Set
+    # ``regime_auto_pause_on_shift=true`` to auto-block new BUYs while
+    # a shift is active (an in-memory flag cleared on the next calm
+    # verdict; never persists across restarts so the bot self-heals).
+    regime_detector_enabled: bool = field(
+        default_factory=lambda: _env_bool("REGIME_DETECTOR_ENABLED", False)
+    )
+    regime_detector_interval_minutes: float = field(
+        default_factory=lambda: _env_float("REGIME_DETECTOR_INTERVAL_MINUTES", 5.0)
+    )
+    regime_move_threshold: float = field(
+        default_factory=lambda: _env_float("REGIME_MOVE_THRESHOLD", 0.05)
+    )
+    regime_fraction_threshold: float = field(
+        default_factory=lambda: _env_float("REGIME_FRACTION_THRESHOLD", 0.25)
+    )
+    regime_min_universe: int = field(
+        default_factory=lambda: _env_int("REGIME_MIN_UNIVERSE", 20)
+    )
+    regime_lookback_points: int = field(
+        default_factory=lambda: _env_int("REGIME_LOOKBACK_POINTS", 10)
+    )
+    regime_auto_pause_on_shift: bool = field(
+        default_factory=lambda: _env_bool("REGIME_AUTO_PAUSE_ON_SHIFT", False)
+    )
+
+    # -- Daily summary scheduler -----------------------------------------------
+    # When enabled, the tick loop fires the same daily summary that
+    # the CLI prints, dispatched through the alert manager at info
+    # severity, shortly after UTC midnight.  Idempotent: fires at
+    # most once per UTC day, tracked in-memory.
+    daily_summary_enabled: bool = field(
+        default_factory=lambda: _env_bool("DAILY_SUMMARY_ENABLED", False)
+    )
+
+    # -- Latency telemetry (opt-in) --------------------------------------------
+    # Rolling recorder for signal→submit→fill intervals.  Fires a
+    # warning alert when the latest end-to-end latency exceeds the
+    # threshold (0 = disabled).  Dashboard: GET /api/latency.
+    latency_tracking_enabled: bool = field(
+        default_factory=lambda: _env_bool("LATENCY_TRACKING_ENABLED", False)
+    )
+    latency_alert_threshold_ms: float = field(
+        default_factory=lambda: _env_float("LATENCY_ALERT_THRESHOLD_MS", 0.0)
+    )
+    latency_window_samples: int = field(
+        default_factory=lambda: _env_int("LATENCY_WINDOW_SAMPLES", 500)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the

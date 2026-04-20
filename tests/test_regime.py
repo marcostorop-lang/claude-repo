@@ -124,6 +124,44 @@ class TestReturnsHelper:
 
 
 class TestEndToEnd:
+    def test_risk_manager_blocks_buy_when_regime_paused(self):
+        from src.config import Config
+        from src.portfolio.tracker import PortfolioTracker
+        from src.risk.manager import RiskManager
+        from src.strategy.base import Action, Signal
+
+        cfg = Config()
+        object.__setattr__(cfg, "max_position_size", 100.0)
+        object.__setattr__(cfg, "max_total_exposure", 500.0)
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.regime_paused = True
+        rm.regime_pause_reason = "regime shift (down): 25/25"
+        buy = Signal(action=Action.BUY, confidence=1.0, reason="t", features={})
+        v = rm.check("tok1", buy, proposed_size=10.0, price=0.5)
+        assert v.allowed is False
+        assert "Regime shift active" in v.reason
+
+    def test_risk_manager_allows_sell_when_regime_paused(self):
+        from src.config import Config
+        from src.portfolio.tracker import PortfolioTracker, Position
+        from src.risk.manager import RiskManager
+        from src.strategy.base import Action, Signal
+
+        cfg = Config()
+        object.__setattr__(cfg, "max_position_size", 100.0)
+        object.__setattr__(cfg, "max_total_exposure", 500.0)
+        pt = PortfolioTracker()
+        pt.open_position(Position(
+            token_id="tok1", condition_id="c1", side="BUY",
+            size=10.0, entry_price=0.5, strategy="s", order_id="o",
+        ))
+        rm = RiskManager(cfg, pt)
+        rm.regime_paused = True
+        rm.regime_pause_reason = "x"
+        sell = Signal(action=Action.SELL, confidence=1.0, reason="exit", features={})
+        v = rm.check("tok1", sell, proposed_size=10.0, price=0.5)
+        assert v.allowed is True
+
     def test_coordinated_down_move_flagged(self):
         # Build 25 tokens, all dropping from 0.50 to 0.40 (= -20%) over 6 ticks.
         hist = {
