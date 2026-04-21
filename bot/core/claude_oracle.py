@@ -4,10 +4,14 @@ Sends market context to Claude and parses a calibrated probability
 estimate with confidence and reasoning.  Uses prompt caching on the
 system prompt (saves ~90% tokens on repeated calls within the same
 session).
+
+All SDK calls are dispatched to a worker thread via ``asyncio.to_thread``
+so the event loop isn't blocked by the sync Anthropic client.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -137,7 +141,8 @@ class ClaudeOracle:
         user_msg = "\n".join(context_parts)
 
         try:
-            resp = self._client.messages.create(
+            resp = await asyncio.to_thread(
+                self._client.messages.create,
                 model=cfg.claude_model,
                 max_tokens=cfg.claude_max_tokens,
                 temperature=cfg.claude_temperature,
@@ -203,7 +208,8 @@ Respond with ONLY this JSON array (empty array if no relationships found):
 ]"""
 
         try:
-            resp = self._client.messages.create(
+            resp = await asyncio.to_thread(
+                self._client.messages.create,
                 model=cfg.claude_model,
                 max_tokens=cfg.claude_max_tokens,
                 temperature=0.1,
@@ -237,7 +243,8 @@ Respond with ONLY this JSON array (empty array if no relationships found):
         Higher = wider spread needed.
         """
         try:
-            resp = self._client.messages.create(
+            resp = await asyncio.to_thread(
+                self._client.messages.create,
                 model=cfg.claude_model,
                 max_tokens=256,
                 temperature=0.1,

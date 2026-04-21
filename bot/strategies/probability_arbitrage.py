@@ -20,6 +20,7 @@ import logging
 import time
 
 from bot.config import cfg
+from bot.core import calibration
 from bot.core.claude_oracle import ClaudeOracle
 from bot.core.polymarket_client import (
     fetch_active_markets,
@@ -120,6 +121,20 @@ class ProbabilityArbitrage:
             "[prob_arb] %s | P_claude=%.3f P_market=%.3f edge=%.3f net=%.3f conf=%.2f",
             mkt.question[:60], estimate.probability, midpoint,
             raw_edge, net_edge, estimate.confidence,
+        )
+
+        # Persist every estimate for calibration tracking — whether we trade or not.
+        calibration.record_estimate(
+            strategy=self.name,
+            condition_id=mkt.condition_id,
+            token_id=yes_token,
+            question=mkt.question,
+            p_claude=estimate.probability,
+            p_market=midpoint,
+            confidence=estimate.confidence,
+            edge=net_edge,
+            edge_direction=estimate.edge_direction,
+            reasoning=estimate.reasoning,
         )
 
         if net_edge < cfg.prob_arb_min_edge_pct:

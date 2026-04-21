@@ -1,0 +1,24 @@
+services:
+  bot:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: polymarket-bot
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    # Bind healthcheck only to localhost on the host
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Persist logs & calibration DB on the host
+      - ./data/logs:/app/bot/logs
+    # tty/interactive so signals propagate
+    tty: true
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

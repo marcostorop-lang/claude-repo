@@ -1,0 +1,42 @@
+[Unit]
+Description=Polymarket Trading Bot (paper mode by default)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- adjust these to your VPS layout ---
+User=polybot
+Group=polybot
+WorkingDirectory=/opt/polymarket-bot
+EnvironmentFile=/opt/polymarket-bot/bot/.env
+ExecStart=/opt/polymarket-bot/.venv/bin/python -m bot.main run
+
+# Restart on crashes, but not if the bot exits cleanly on purpose
+Restart=on-failure
+RestartSec=15s
+# Give up after 5 rapid restarts — alert the operator instead of flapping
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Graceful shutdown — the bot respects SIGTERM and finishes the current cycle
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Logging → journald (view with: journalctl -u polymarket-bot -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-bot
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/polymarket-bot/bot/logs
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

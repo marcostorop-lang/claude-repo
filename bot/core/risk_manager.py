@@ -6,15 +6,19 @@ The risk manager never places orders; it only validates and sizes.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 from bot.config import cfg
 from bot.core.utils import Side, TradeSignal, kelly_size
 
 logger = logging.getLogger(__name__)
+
+_REJECTIONS_LOG = Path(__file__).resolve().parent.parent / "logs" / "rejections.jsonl"
 
 
 @dataclass
@@ -54,6 +58,36 @@ class RiskManager:
         self._current_equity: float = cfg.starting_capital_usd
         self._total_realized_pnl: float = 0.0
         self._circuit_breaker: bool = False
+        self._rejection_counts: dict[str, int] = {}
+
+    # ------------------------------------------------------------------
+    # Rejection logging
+    # ------------------------------------------------------------------
+
+    def _record_rejection(self, signal: TradeSignal, reason: str) -> None:
+        """Count + persist a rejection so we can analyse missed trades."""
+        key = reason.split(".")[0].lower().strip()
+        self._rejection_counts[key] = self._rejection_counts.get(key, 0) + 1
+        try:
+            _REJECTIONS_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(_REJECTIONS_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "ts": time.time(),
+                    "strategy": signal.strategy,
+                    "condition_id": signal.condition_id,
+                    "token_id": signal.token_id,
+                    "side": signal.side.value,
+                    "price": signal.price,
+                    "edge": signal.edge,
+                    "confidence": signal.confidence,
+                    "reason": reason,
+                }) + "\n")
+        except Exception:
+            logger.debug("Rejection log write failed.", exc_info=True)
+
+    @property
+    def rejection_counts(self) -> dict[str, int]:
+        return dict(self._rejection_counts)
 
     # ------------------------------------------------------------------
     # Equity / PnL tracking
@@ -156,17 +190,25 @@ class RiskManager:
         """Validate a signal and compute position size.  Returns a verdict."""
         self._maybe_reset_daily()
 
+        def _reject(reason: str) -> RiskVerdict:
+            self._record_rejection(signal, reason)
+            return RiskVerdict(False, reason=reason)
+
+        # Sanity: price must be in (0, 1)
+        if signal.price <= 0.0 or signal.price >= 1.0:
+            return _reject(f"Invalid price {signal.price:.4f} (must be 0 < p < 1).")
+
         # Circuit breaker / drawdown
         if self.is_halted:
-            return RiskVerdict(False, reason="Trading halted (circuit breaker or drawdown).")
+            return _reject("Trading halted (circuit breaker or drawdown).")
 
         # Already have position in this token
         if signal.side == Side.BUY and signal.token_id in self.positions:
-            return RiskVerdict(False, reason="Already have open position for this token.")
+            return _reject("Already have open position for this token.")
 
         # Max positions
         if signal.side == Side.BUY and self.position_count >= cfg.max_positions:
-            return RiskVerdict(False, reason=f"Max positions ({cfg.max_positions}) reached.")
+            return _reject(f"Max positions ({cfg.max_positions}) reached.")
 
         # Compute Kelly size
         raw_size = kelly_size(
@@ -177,7 +219,7 @@ class RiskManager:
             max_bet=cfg.max_position_usd,
         )
         if raw_size <= 0:
-            return RiskVerdict(False, reason="Kelly size is zero (edge or confidence too low).")
+            return _reject("Kelly size is zero (edge or confidence too low).")
 
         # Concentration limit
         cond_exposure = self.exposure_for_condition(signal.condition_id)
@@ -185,17 +227,17 @@ class RiskManager:
         if cond_exposure + raw_size > max_cond:
             raw_size = max(0, max_cond - cond_exposure)
             if raw_size <= 0:
-                return RiskVerdict(False, reason="Concentration limit reached for this event.")
+                return _reject("Concentration limit reached for this event.")
 
         # Total exposure cap
         if self.total_exposure + raw_size > cfg.max_total_exposure_usd:
             raw_size = max(0, cfg.max_total_exposure_usd - self.total_exposure)
             if raw_size <= 0:
-                return RiskVerdict(False, reason="Total exposure limit reached.")
+                return _reject("Total exposure limit reached.")
 
         # Floor
         if raw_size < 1.0:
-            return RiskVerdict(False, reason="Position size too small ($<1).")
+            return _reject("Position size too small ($<1).")
 
         return RiskVerdict(
             approved=True,

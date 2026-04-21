@@ -26,6 +26,7 @@ from pathlib import Path
 import click
 
 from bot.config import cfg
+from bot.core import calibration
 from bot.core.claude_oracle import ClaudeOracle
 from bot.core.risk_manager import RiskManager
 from bot.core.utils import notify_discord, notify_telegram
@@ -158,6 +159,17 @@ async def _run_bot() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # Healthcheck HTTP server (daemon thread)
+    if cfg.healthcheck_enabled:
+        try:
+            from bot.core import healthcheck
+            healthcheck.update_state(mode=mode.lower())
+            healthcheck.start_in_thread(
+                host=cfg.healthcheck_host, port=cfg.healthcheck_port,
+            )
+        except Exception:
+            logger.warning("Healthcheck server failed to start.", exc_info=True)
+
     cycle = 0
     last_report = ""
     startup_msg = f"Bot started | mode={mode} | strategies={','.join(active)}"
@@ -195,6 +207,24 @@ async def _run_bot() -> None:
             s["equity"], s["daily_pnl"], s["drawdown_pct"],
             s["positions"], s["exposure"],
         )
+
+        # Publish state to healthcheck
+        if cfg.healthcheck_enabled:
+            try:
+                from bot.core import healthcheck
+                healthcheck.update_state(
+                    last_cycle_ts=time.time(),
+                    cycle_count=cycle,
+                    equity=s["equity"],
+                    daily_pnl=s["daily_pnl"],
+                    total_pnl=s["total_pnl"],
+                    drawdown_pct=s["drawdown_pct"],
+                    positions=s["positions"],
+                    exposure=s["exposure"],
+                    halted=s["halted"],
+                )
+            except Exception:
+                logger.debug("healthcheck update failed", exc_info=True)
 
         # Daily report (once per UTC day)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -278,6 +308,180 @@ def backtest(token_id: str, question: str):
         click.echo(format_backtest_report(result))
 
     asyncio.run(_bt())
+
+
+@cli.command()
+def preflight():
+    """Pre-launch sanity checks.  Run this before ``run``.
+
+    Verifies:
+      - Environment variables / safety gates
+      - Anthropic key + Claude reachability (1 cheap call)
+      - Gamma API reachability
+      - CLOB client buildable (only if live)
+      - Log directory writable
+    """
+    _setup_logging()
+    click.echo(click.style("\n=== Pre-flight checks ===\n", bold=True))
+
+    ok = True
+
+    def check(label: str, success: bool, detail: str = "") -> None:
+        nonlocal ok
+        tag = click.style("PASS", fg="green") if success else click.style("FAIL", fg="red")
+        click.echo(f"  [{tag}] {label}" + (f"  — {detail}" if detail else ""))
+        if not success:
+            ok = False
+
+    # 1. Mode / safety
+    if cfg.is_live:
+        check("Trading mode", True, click.style("LIVE (real money)", fg="yellow", bold=True))
+    elif cfg.is_paper:
+        check("Trading mode", True, "paper")
+    else:
+        check("Trading mode", False, f"Unrecognized mode={cfg.trading_mode!r}")
+
+    # 2. Strategy toggles
+    active = [
+        s for s, enabled in [
+            ("probability_arb", cfg.strategy_probability_arb),
+            ("logical_arb", cfg.strategy_logical_arb),
+            ("market_making", cfg.strategy_market_making),
+        ] if enabled
+    ]
+    check("At least one strategy enabled", bool(active), ", ".join(active) or "none")
+
+    # 3. Anthropic key
+    has_key = bool(cfg.anthropic_api_key)
+    check("ANTHROPIC_API_KEY set", has_key)
+
+    # 4. Claude reachability
+    if has_key:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+            resp = client.messages.create(
+                model=cfg.claude_model,
+                max_tokens=10,
+                messages=[{"role": "user", "content": "say ok"}],
+            )
+            _ = resp.content[0].text
+            check("Claude API reachable", True, f"model={cfg.claude_model}")
+        except Exception as exc:
+            check("Claude API reachable", False, str(exc)[:80])
+    else:
+        check("Claude API reachable", False, "skipped (no key)")
+
+    # 5. Gamma API
+    async def _gamma_check() -> tuple[bool, str]:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"{cfg.gamma_url}/markets", params={"limit": "1"})
+                return r.status_code == 200, f"HTTP {r.status_code}"
+        except Exception as exc:
+            return False, str(exc)[:80]
+
+    gamma_ok, gamma_detail = asyncio.run(_gamma_check())
+    check("Gamma API reachable", gamma_ok, gamma_detail)
+
+    # 6. CLOB client (only check if live mode)
+    if cfg.is_live:
+        if not cfg.private_key:
+            check("CLOB private key", False, "PRIVATE_KEY not set")
+        else:
+            try:
+                from bot.core.polymarket_client import _get_clob
+                clob = _get_clob()
+                check("CLOB client", clob is not None, cfg.clob_url)
+            except Exception as exc:
+                check("CLOB client", False, str(exc)[:80])
+    else:
+        click.echo("  [skip] CLOB client  — paper mode, not required")
+
+    # 7. Log dir writable
+    try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        test_path = _LOG_DIR / ".preflight_test"
+        test_path.write_text("ok", encoding="utf-8")
+        test_path.unlink()
+        check("Log directory writable", True, str(_LOG_DIR))
+    except Exception as exc:
+        check("Log directory writable", False, str(exc)[:80])
+
+    # 8. Calibration DB
+    try:
+        metrics = calibration.compute_metrics()
+        check(
+            "Calibration DB",
+            True,
+            f"resolved={metrics.n_resolved} pending={metrics.n_pending}",
+        )
+    except Exception as exc:
+        check("Calibration DB", False, str(exc)[:80])
+
+    # 9. Paper order round-trip
+    async def _paper_roundtrip() -> tuple[bool, str]:
+        try:
+            from bot.core.polymarket_client import place_order
+            from bot.core.utils import Side
+            r = await place_order("test_token_preflight", Side.BUY, 0.5, 1)
+            return r.success, f"order_id={r.order_id} mode={r.mode}"
+        except Exception as exc:
+            return False, str(exc)[:80]
+
+    if cfg.is_paper:
+        po_ok, po_detail = asyncio.run(_paper_roundtrip())
+        check("Paper order round-trip", po_ok, po_detail)
+
+    click.echo()
+    if ok:
+        click.echo(click.style("All checks passed — safe to run.\n", fg="green", bold=True))
+        sys.exit(0)
+    else:
+        click.echo(click.style("Some checks failed — fix before running.\n", fg="red", bold=True))
+        sys.exit(1)
+
+
+@cli.command()
+@click.option("--strategy", default="", help="Filter by strategy name.")
+def calibration_report(strategy: str):
+    """Show calibration metrics from recorded estimates."""
+    _setup_logging()
+    m = calibration.compute_metrics(strategy)
+    click.echo(click.style("\n=== Calibration report ===\n", bold=True))
+    filter_note = f" [strategy={strategy}]" if strategy else ""
+    click.echo(f"Scope{filter_note}")
+    click.echo(f"  Resolved estimates: {m.n_resolved}")
+    click.echo(f"  Pending estimates:  {m.n_pending}")
+    if m.n_resolved > 0:
+        click.echo(f"  Brier score:  {m.brier_score:.4f}   (lower is better, 0.25 = random)")
+        click.echo(f"  Log loss:     {m.log_loss:.4f}")
+        click.echo(f"  Mean P(claude): {m.mean_p_claude:.3f}")
+        click.echo(f"  Mean outcome:   {m.mean_outcome:.3f}")
+    else:
+        click.echo("  (no resolved estimates yet — let the bot run and record outcomes)")
+    click.echo()
+
+
+@cli.command()
+@click.option("--condition-id", required=True, help="Market condition_id.")
+@click.option("--outcome", required=True, type=click.Choice(["0", "1"]),
+              help="Resolution: 1 = YES, 0 = NO.")
+def record_resolution(condition_id: str, outcome: str):
+    """Record a market resolution so calibration can be computed."""
+    _setup_logging()
+    n = calibration.record_outcome(condition_id, int(outcome))
+    click.echo(f"Updated {n} estimate(s) for {condition_id}.")
+
+
+@cli.command()
+@click.option("--port", default=8787, type=int, help="HTTP port.")
+@click.option("--host", default="127.0.0.1", help="HTTP bind address.")
+def healthcheck_server(port: int, host: str):
+    """Run a minimal healthcheck HTTP server (for monitoring / k8s)."""
+    from bot.core.healthcheck import run_server
+    run_server(host=host, port=port)
 
 
 if __name__ == "__main__":

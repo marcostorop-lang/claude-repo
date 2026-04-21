@@ -117,5 +117,10 @@ class BotConfig:
     log_level: str = field(default_factory=lambda: _e("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: _e("LOG_FILE", "logs/bot.log"))
 
+    # -- Healthcheck server --------------------------------------------------
+    healthcheck_enabled: bool = field(default_factory=lambda: _eb("HEALTHCHECK_ENABLED", True))
+    healthcheck_host: str = field(default_factory=lambda: _e("HEALTHCHECK_HOST", "127.0.0.1"))
+    healthcheck_port: int = field(default_factory=lambda: _ei("HEALTHCHECK_PORT", 8787))
+
 
 cfg = BotConfig()
