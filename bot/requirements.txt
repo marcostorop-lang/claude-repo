@@ -1,0 +1,19 @@
+# Polymarket Trading Bot — dependencies
+
+# Polymarket CLOB SDK
+py-clob-client>=0.6.0
+
+# Anthropic (Claude API)
+anthropic>=0.40.0
+
+# HTTP client (async)
+httpx>=0.27.0
+
+# CLI
+click>=8.1.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Optional: structured logging (can use stdlib logging instead)
+# loguru>=0.7.0
