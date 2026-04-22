@@ -96,6 +96,65 @@ class LogicalRelation:
 # ---------------------------------------------------------------------------
 
 
+_INPUT_COST_PER_1K = 0.003
+_OUTPUT_COST_PER_1K = 0.015
+_CACHED_INPUT_COST_PER_1K = 0.0003
+
+
+class _BudgetTracker:
+    """Track daily Claude API spend and enforce budget cap."""
+
+    def __init__(self) -> None:
+        self._daily_spend: float = 0.0
+        self._daily_date: str = ""
+        self._total_calls: int = 0
+
+    def _maybe_reset(self) -> None:
+        from datetime import date
+        today = date.today().isoformat()
+        if today != self._daily_date:
+            self._daily_spend = 0.0
+            self._daily_date = today
+
+    def record_usage(self, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> None:
+        self._maybe_reset()
+        non_cached_input = max(0, input_tokens - cached_tokens)
+        cost = (
+            non_cached_input / 1000 * _INPUT_COST_PER_1K
+            + cached_tokens / 1000 * _CACHED_INPUT_COST_PER_1K
+            + output_tokens / 1000 * _OUTPUT_COST_PER_1K
+        )
+        self._daily_spend += cost
+        self._total_calls += 1
+
+    @property
+    def daily_spend(self) -> float:
+        self._maybe_reset()
+        return self._daily_spend
+
+    @property
+    def budget_remaining(self) -> float:
+        return max(0, cfg.claude_daily_budget_usd - self.daily_spend)
+
+    @property
+    def is_budget_exceeded(self) -> bool:
+        return self.daily_spend >= cfg.claude_daily_budget_usd
+
+    @property
+    def total_calls(self) -> int:
+        return self._total_calls
+
+    def summary(self) -> dict:
+        self._maybe_reset()
+        return {
+            "daily_spend_usd": round(self._daily_spend, 4),
+            "budget_limit_usd": cfg.claude_daily_budget_usd,
+            "budget_remaining_usd": round(self.budget_remaining, 4),
+            "budget_exceeded": self.is_budget_exceeded,
+            "total_calls": self._total_calls,
+        }
+
+
 class ClaudeOracle:
     """Async wrapper around the Anthropic SDK for probability estimation."""
 
@@ -103,6 +162,7 @@ class ClaudeOracle:
         if not cfg.anthropic_api_key:
             logger.warning("ANTHROPIC_API_KEY not set — oracle calls will fail.")
         self._client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+        self.budget = _BudgetTracker()
 
     async def estimate_probability(
         self,
@@ -140,6 +200,11 @@ class ClaudeOracle:
 
         user_msg = "\n".join(context_parts)
 
+        if self.budget.is_budget_exceeded:
+            logger.warning("Claude daily budget exceeded ($%.2f/$%.2f) — skipping estimate.",
+                           self.budget.daily_spend, cfg.claude_daily_budget_usd)
+            return None
+
         try:
             resp = await asyncio.to_thread(
                 self._client.messages.create,
@@ -154,6 +219,7 @@ class ClaudeOracle:
                 messages=[{"role": "user", "content": user_msg}],
             )
 
+            self._record_response_cost(resp)
             raw = resp.content[0].text.strip()
             return _parse_estimate(raw)
 
@@ -207,6 +273,10 @@ Respond with ONLY this JSON array (empty array if no relationships found):
   }}
 ]"""
 
+        if self.budget.is_budget_exceeded:
+            logger.warning("Claude daily budget exceeded — skipping logical relation detection.")
+            return []
+
         try:
             resp = await asyncio.to_thread(
                 self._client.messages.create,
@@ -226,12 +296,29 @@ Respond with ONLY this JSON array (empty array if no relationships found):
                 messages=[{"role": "user", "content": user_msg}],
             )
 
+            self._record_response_cost(resp)
             raw = resp.content[0].text.strip()
             return _parse_relations(raw, markets)
 
         except Exception:
             logger.exception("Logical relation detection failed.")
         return []
+
+    def _record_response_cost(self, resp) -> None:
+        """Extract token usage from API response and record cost."""
+        try:
+            usage = resp.usage
+            input_tokens = getattr(usage, "input_tokens", 0)
+            output_tokens = getattr(usage, "output_tokens", 0)
+            cached_tokens = getattr(usage, "cache_read_input_tokens", 0)
+            self.budget.record_usage(input_tokens, output_tokens, cached_tokens)
+            logger.debug(
+                "Claude API cost: in=%d out=%d cached=%d | daily=$%.4f/$%.2f",
+                input_tokens, output_tokens, cached_tokens,
+                self.budget.daily_spend, cfg.claude_daily_budget_usd,
+            )
+        except Exception:
+            logger.debug("Failed to record API cost.", exc_info=True)
 
     async def assess_volatility(
         self,
@@ -242,6 +329,10 @@ Respond with ONLY this JSON array (empty array if no relationships found):
 
         Higher = wider spread needed.
         """
+        if self.budget.is_budget_exceeded:
+            logger.warning("Claude daily budget exceeded — using default volatility.")
+            return 1.0
+
         try:
             resp = await asyncio.to_thread(
                 self._client.messages.create,
@@ -260,6 +351,7 @@ Respond with ONLY this JSON array (empty array if no relationships found):
                 }],
                 messages=[{"role": "user", "content": f"Market: {question}\n{description[:200]}"}],
             )
+            self._record_response_cost(resp)
             raw = resp.content[0].text.strip()
             parsed = _extract_json(raw)
             if parsed and "volatility_multiplier" in parsed:

@@ -247,6 +247,123 @@ class RiskManager:
         )
 
     # ------------------------------------------------------------------
+    # Position exit scanner
+    # ------------------------------------------------------------------
+
+    async def check_exits(self, get_book_fn) -> list[dict]:
+        """Scan open positions for stop-loss, take-profit, or expiration.
+
+        ``get_book_fn`` must be an async callable(token_id) → BookSnapshot.
+        Returns a list of exit records for logging.
+        """
+        exits: list[dict] = []
+        now = time.time()
+
+        for token_id in list(self.positions):
+            pos = self.positions.get(token_id)
+            if pos is None:
+                continue
+
+            reason = ""
+            exit_price = 0.0
+
+            # Check max hold time
+            hold_hours = (now - pos.timestamp) / 3600.0
+            if hold_hours >= cfg.max_hold_hours:
+                reason = f"max_hold ({hold_hours:.1f}h >= {cfg.max_hold_hours}h)"
+
+            # Fetch current price
+            if not reason:
+                try:
+                    book = await get_book_fn(token_id)
+                    mid = book.midpoint
+                    if mid <= 0:
+                        continue
+                except Exception:
+                    logger.debug("Book fetch failed for exit check on %s", token_id[:12])
+                    continue
+            else:
+                try:
+                    book = await get_book_fn(token_id)
+                    mid = book.midpoint if book.midpoint > 0 else pos.entry_price
+                except Exception:
+                    mid = pos.entry_price
+
+            exit_price = mid
+
+            if not reason:
+                # Compute unrealized PnL percentage
+                if pos.side == Side.BUY:
+                    pnl_pct = (mid - pos.entry_price) / pos.entry_price if pos.entry_price > 0 else 0
+                else:
+                    pnl_pct = (pos.entry_price - mid) / pos.entry_price if pos.entry_price > 0 else 0
+
+                if pnl_pct <= -cfg.stop_loss_pct:
+                    reason = f"stop_loss ({pnl_pct:.1%} <= -{cfg.stop_loss_pct:.0%})"
+                elif pnl_pct >= cfg.take_profit_pct:
+                    reason = f"take_profit ({pnl_pct:.1%} >= {cfg.take_profit_pct:.0%})"
+
+            if reason:
+                pnl = self.close_position(token_id, exit_price)
+                record = {
+                    "event": "position_exit",
+                    "token_id": token_id[:16],
+                    "side": pos.side.value,
+                    "entry_price": round(pos.entry_price, 4),
+                    "exit_price": round(exit_price, 4),
+                    "size": round(pos.size, 4),
+                    "pnl": round(pnl, 4),
+                    "reason": reason,
+                    "strategy": pos.strategy,
+                    "hold_hours": round((now - pos.timestamp) / 3600.0, 1),
+                    "timestamp": now,
+                }
+                logger.info(
+                    "EXIT | %s | %s @ %.4f → %.4f | PnL=$%.2f | %s",
+                    pos.side.value, token_id[:12], pos.entry_price,
+                    exit_price, pnl, reason,
+                )
+                exits.append(record)
+
+        return exits
+
+    # ------------------------------------------------------------------
+    # Brier gate for live trading
+    # ------------------------------------------------------------------
+
+    def check_calibration_gate(self) -> tuple[bool, str]:
+        """Check if calibration is sufficient for live trading.
+
+        Returns (passed, message).  Only relevant when cfg.is_live.
+        """
+        if not cfg.is_live:
+            return True, "Paper mode — no calibration gate."
+
+        try:
+            from bot.core.calibration import compute_metrics
+            m = compute_metrics()
+
+            if m.n_resolved < cfg.min_resolved_estimates:
+                return False, (
+                    f"Calibration gate FAILED: only {m.n_resolved} resolved estimates "
+                    f"(need {cfg.min_resolved_estimates}). Keep running in paper mode."
+                )
+
+            if m.brier_score > cfg.max_brier_score:
+                return False, (
+                    f"Calibration gate FAILED: Brier score {m.brier_score:.4f} "
+                    f"> max {cfg.max_brier_score:.4f}. Oracle needs better calibration."
+                )
+
+            return True, (
+                f"Calibration gate PASSED: {m.n_resolved} resolved, "
+                f"Brier={m.brier_score:.4f} (limit {cfg.max_brier_score:.4f})."
+            )
+        except Exception:
+            logger.exception("Calibration gate check failed.")
+            return False, "Calibration gate check error — refusing live trading."
+
+    # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------
 

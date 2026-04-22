@@ -108,6 +108,18 @@ class BotConfig:
     max_positions: int = field(default_factory=lambda: _ei("MAX_POSITIONS", 10))
     max_concentration_pct: float = field(default_factory=lambda: _ef("MAX_CONCENTRATION_PCT", 0.25))
 
+    # -- Position exit -------------------------------------------------------
+    stop_loss_pct: float = field(default_factory=lambda: _ef("STOP_LOSS_PCT", 0.15))
+    take_profit_pct: float = field(default_factory=lambda: _ef("TAKE_PROFIT_PCT", 0.25))
+    max_hold_hours: float = field(default_factory=lambda: _ef("MAX_HOLD_HOURS", 72.0))
+
+    # -- Calibration gate (for live mode) ------------------------------------
+    min_resolved_estimates: int = field(default_factory=lambda: _ei("MIN_RESOLVED_ESTIMATES", 50))
+    max_brier_score: float = field(default_factory=lambda: _ef("MAX_BRIER_SCORE", 0.25))
+
+    # -- Claude API budget ---------------------------------------------------
+    claude_daily_budget_usd: float = field(default_factory=lambda: _ef("CLAUDE_DAILY_BUDGET_USD", 10.0))
+
     # -- Notifications (stubs) -----------------------------------------------
     telegram_token: str = field(default_factory=lambda: _e("TELEGRAM_TOKEN"))
     telegram_chat_id: str = field(default_factory=lambda: _e("TELEGRAM_CHAT_ID"))

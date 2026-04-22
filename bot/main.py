@@ -126,6 +126,18 @@ async def _run_bot() -> None:
     else:
         logger.info("Paper mode — no real orders.")
 
+    # Brier calibration gate (blocks live trading until proven accuracy)
+    if cfg.is_live:
+        from bot.core.calibration import compute_metrics as _cm
+        _temp_risk = RiskManager()
+        gate_ok, gate_msg = _temp_risk.check_calibration_gate()
+        if not gate_ok:
+            logger.error("🚫 %s", gate_msg)
+            logger.error("Bot will NOT start in live mode until calibration gate passes.")
+            return
+        logger.info("✅ %s", gate_msg)
+        del _temp_risk
+
     # Show active strategies
     active = []
     if cfg.strategy_probability_arb:
@@ -200,6 +212,15 @@ async def _run_bot() -> None:
             except Exception:
                 logger.exception("Strategy %s crashed — continuing.", strat.name)
 
+        # Check position exits (stop-loss, take-profit, max hold)
+        try:
+            from bot.core.polymarket_client import get_book
+            exits = await risk.check_exits(get_book)
+            for ex in exits:
+                _persist_trade(ex)
+        except Exception:
+            logger.exception("Position exit check failed.")
+
         # Log risk state
         s = risk.summary()
         logger.info(
@@ -212,6 +233,7 @@ async def _run_bot() -> None:
         if cfg.healthcheck_enabled:
             try:
                 from bot.core import healthcheck
+                budget = oracle.budget.summary()
                 healthcheck.update_state(
                     last_cycle_ts=time.time(),
                     cycle_count=cycle,
@@ -222,6 +244,9 @@ async def _run_bot() -> None:
                     positions=s["positions"],
                     exposure=s["exposure"],
                     halted=s["halted"],
+                    claude_daily_spend=budget["daily_spend_usd"],
+                    claude_budget_limit=budget["budget_limit_usd"],
+                    claude_calls=budget["total_calls"],
                 )
             except Exception:
                 logger.debug("healthcheck update failed", exc_info=True)
@@ -429,6 +454,24 @@ def preflight():
         )
     except Exception as exc:
         check("Calibration DB", False, str(exc)[:80])
+
+    # 8b. Calibration gate (informational — only enforced in live mode)
+    if cfg.is_live:
+        temp_rm = RiskManager()
+        gate_ok, gate_msg = temp_rm.check_calibration_gate()
+        check("Calibration gate (live required)", gate_ok, gate_msg)
+    else:
+        try:
+            m = calibration.compute_metrics()
+            if m.n_resolved >= cfg.min_resolved_estimates and m.brier_score <= cfg.max_brier_score:
+                click.echo(f"  [info] Calibration gate would PASS if live "
+                           f"(n={m.n_resolved}, Brier={m.brier_score:.4f})")
+            else:
+                click.echo(f"  [info] Calibration gate would FAIL if live "
+                           f"(n={m.n_resolved}/{cfg.min_resolved_estimates}, "
+                           f"Brier={m.brier_score:.4f}/{cfg.max_brier_score:.4f})")
+        except Exception:
+            pass
 
     # 9. Paper order round-trip
     async def _paper_roundtrip() -> tuple[bool, str]:
