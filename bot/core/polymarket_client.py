@@ -281,11 +281,33 @@ async def place_order(
     side: Side,
     price: float,
     size: float,
+    book: BookSnapshot | None = None,
 ) -> OrderResult:
-    """Place a limit order.  Paper mode simulates an instant fill."""
+    """Place a limit order.  Paper mode simulates an instant fill.
+
+    If a ``BookSnapshot`` is provided, slippage is scaled based on
+    order size relative to available depth (depth-aware slippage model).
+    """
     if cfg.is_paper:
+        # Depth-aware slippage: scale slippage based on order size vs book depth
+        if book is not None:
+            depth_usd = book.bid_depth_usd if side == Side.BUY else book.ask_depth_usd
+            if depth_usd > 0:
+                # order_usd is size (shares) * price
+                order_usd = size * price
+                depth_ratio = order_usd / depth_usd
+                # Scale slippage: ratio of 1.0 means ~2x base slippage
+                depth_mult = 1.0 + depth_ratio
+            else:
+                depth_mult = 2.0  # no depth info → assume worst case
+        else:
+            depth_mult = 1.0  # no book → use base slippage
+
         # Realistic paper fills: slippage + fees + occasional partial fills
-        slippage_bps = max(0, random.gauss(_PAPER_SLIPPAGE_BPS_MEAN, _PAPER_SLIPPAGE_BPS_STD))
+        slippage_bps = max(0, random.gauss(
+            _PAPER_SLIPPAGE_BPS_MEAN * depth_mult,
+            _PAPER_SLIPPAGE_BPS_STD * depth_mult,
+        ))
         slippage_pct = slippage_bps / 10000.0
         if side == Side.BUY:
             fill_price = min(0.99, price * (1.0 + slippage_pct))

@@ -28,7 +28,7 @@ from bot.core.polymarket_client import (
     place_order,
 )
 from bot.core.risk_manager import RiskManager
-from bot.core.utils import MarketInfo, Side, TradeSignal
+from bot.core.utils import LatencyTracker, MarketInfo, Side, TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,12 @@ class ProbabilityArbitrage:
         self._risk = risk
         self._last_scan = 0.0
         self._trades_session: list[dict] = []
+        self._latency_tracker = LatencyTracker(window=200)
+        self._min_edge_override: float | None = None  # for regime detection
+
+    @property
+    def latency_tracker(self) -> LatencyTracker:
+        return self._latency_tracker
 
     async def scan_and_trade(self) -> list[dict]:
         """Run one full scan cycle.  Returns list of trade records."""
@@ -63,6 +69,26 @@ class ProbabilityArbitrage:
         if not markets:
             logger.info("[prob_arb] No markets found.")
             return []
+
+        # Regime detection: adjust edge threshold based on market conditions
+        try:
+            from bot.core.regime_detector import detect_regime
+            sample_prices = [
+                m.outcome_prices[0] for m in markets
+                if m.outcome_prices
+            ][:20]
+            if len(sample_prices) >= 5:
+                regime = detect_regime(sample_prices)
+                adjusted_edge = cfg.prob_arb_min_edge_pct * regime.edge_multiplier
+                self._min_edge_override = adjusted_edge
+                logger.info(
+                    "[prob_arb] Regime=%s edge_mult=%.2f min_edge=%.4f",
+                    regime.regime.value, regime.edge_multiplier, adjusted_edge,
+                )
+            else:
+                self._min_edge_override = None
+        except Exception:
+            self._min_edge_override = None
 
         results: list[dict] = []
         for mkt in markets:
@@ -99,6 +125,9 @@ class ProbabilityArbitrage:
             f"spread={book.spread_pct:.2%} "
             f"bid_depth=${book.bid_depth_usd:.0f} ask_depth=${book.ask_depth_usd:.0f}"
         )
+
+        # Record timestamp when oracle call starts (signal time)
+        t_signal = time.time()
 
         estimate = await self._oracle.estimate_probability(
             question=mkt.question,
@@ -138,7 +167,10 @@ class ProbabilityArbitrage:
             reasoning=estimate.reasoning,
         )
 
-        if net_edge < cfg.prob_arb_min_edge_pct:
+        # Apply regime-adjusted edge threshold if set
+        min_edge = self._min_edge_override if self._min_edge_override is not None else cfg.prob_arb_min_edge_pct
+
+        if net_edge < min_edge:
             return None
         if estimate.confidence < cfg.prob_arb_min_confidence:
             logger.debug("[prob_arb] Confidence %.2f below threshold.", estimate.confidence)
@@ -164,6 +196,7 @@ class ProbabilityArbitrage:
             confidence=estimate.confidence,
             probability=estimate.probability,
             reason=estimate.reasoning,
+            category=mkt.category,
             features={
                 "p_claude": estimate.probability,
                 "p_market": midpoint,
@@ -185,6 +218,11 @@ class ProbabilityArbitrage:
 
         result = await place_order(token_id, side, price, size_shares)
 
+        # Record fill time and compute latency
+        t_fill = time.time()
+        latency_s = t_fill - t_signal
+        self._latency_tracker.record(latency_s)
+
         record = {
             "strategy": self.name,
             "timestamp": time.time(),
@@ -201,6 +239,7 @@ class ProbabilityArbitrage:
             "order_id": result.order_id,
             "success": result.success,
             "mode": result.mode,
+            "signal_to_fill_ms": round(latency_s * 1000, 1),
         }
 
         if result.success:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -34,6 +36,7 @@ class TradeSignal:
     reason: str = ""
     features: dict[str, Any] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
+    category: str = ""  # market category for correlation-aware sizing
 
 
 @dataclass
@@ -124,6 +127,71 @@ async def notify_discord(webhook_url: str, text: str) -> None:
             await client.post(webhook_url, json={"content": text})
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Latency tracking (#12)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LatencyStats:
+    """Summary statistics for a latency distribution."""
+
+    n_samples: int = 0
+    p50_ms: float = 0.0
+    p90_ms: float = 0.0
+    p99_ms: float = 0.0
+    max_ms: float = 0.0
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Compute a percentile from a sorted list (linear interpolation)."""
+    if not sorted_vals:
+        return 0.0
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    idx = pct / 100.0 * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    frac = idx - lo
+    return sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo])
+
+
+class LatencyTracker:
+    """Track signal-to-fill latencies with rolling percentile stats.
+
+    Records latencies in milliseconds and provides p50/p90/p99 summaries.
+    """
+
+    def __init__(self, window: int = 200) -> None:
+        self._window = max(10, window)
+        self._samples: deque[float] = deque(maxlen=self._window)
+
+    def record(self, latency_s: float) -> None:
+        """Record a latency observation in seconds."""
+        if latency_s < 0 or not math.isfinite(latency_s):
+            return
+        self._samples.append(latency_s * 1000.0)  # store in ms
+
+    def stats(self) -> LatencyStats:
+        """Compute summary statistics over the rolling window."""
+        if not self._samples:
+            return LatencyStats()
+        sorted_vals = sorted(self._samples)
+        return LatencyStats(
+            n_samples=len(sorted_vals),
+            p50_ms=round(_percentile(sorted_vals, 50), 2),
+            p90_ms=round(_percentile(sorted_vals, 90), 2),
+            p99_ms=round(_percentile(sorted_vals, 99), 2),
+            max_ms=round(sorted_vals[-1], 2),
+        )
+
+    @property
+    def latest_ms(self) -> float | None:
+        """Return the most recent latency in ms, or None if empty."""
+        return self._samples[-1] if self._samples else None
 
 
 def kelly_size(

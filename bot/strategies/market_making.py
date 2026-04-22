@@ -10,6 +10,9 @@ Flow per tick:
   3. Compute dynamic spread = base_spread × volatility_mult × inventory_skew.
   4. Cancel stale quotes, post new bid+ask.
   5. If inventory > threshold, widen spread on the heavy side.
+
+Inventory is tracked in USD notional (not share counts) so that
+the inventory ratio is price-independent.
 """
 
 from __future__ import annotations
@@ -50,8 +53,8 @@ class MarketMaking:
         # Active quotes: token_id → {"bid_id": ..., "ask_id": ...}
         self._active_quotes: dict[str, dict[str, str]] = {}
 
-        # Inventory tracking: token_id → net shares (positive = long)
-        self._inventory: dict[str, float] = {}
+        # Inventory tracking in USD notional: token_id → net USD (positive = long)
+        self._inventory_usd: dict[str, float] = {}
 
     async def scan_and_trade(self) -> list[dict]:
         now = time.time()
@@ -122,12 +125,12 @@ class MarketMaking:
         # Get volatility multiplier (cached)
         vol_mult = await self._get_volatility(mkt)
 
-        # Inventory skew
-        net_inv = self._inventory.get(token_id, 0.0)
+        # Inventory skew — tracked in USD notional
+        net_inv_usd = self._inventory_usd.get(token_id, 0.0)
         inv_ratio = 0.0
-        if cfg.mm_order_size_usd > 0 and mid > 0:
-            total_capacity = cfg.mm_order_size_usd * 5 / mid
-            inv_ratio = net_inv / total_capacity if total_capacity > 0 else 0.0
+        if cfg.mm_order_size_usd > 0:
+            total_capacity_usd = cfg.mm_order_size_usd * 5
+            inv_ratio = net_inv_usd / total_capacity_usd if total_capacity_usd > 0 else 0.0
 
         # Dynamic spread
         base_spread = cfg.mm_base_spread_pct
@@ -166,15 +169,17 @@ class MarketMaking:
 
         new_quotes: dict[str, str] = {}
 
-        current_inv = net_inv
+        current_inv_usd = net_inv_usd
 
         if not skip_bid:
             bid_result = await place_order(token_id, Side.BUY, bid_price, size_shares)
             if bid_result.success:
                 new_quotes["bid_id"] = bid_result.order_id
                 if bid_result.filled_size > 0:
-                    current_inv += bid_result.filled_size
-                    self._inventory[token_id] = current_inv
+                    # Track in USD notional: filled_size * fill_price
+                    fill_usd = bid_result.filled_size * bid_result.fill_price
+                    current_inv_usd += fill_usd
+                    self._inventory_usd[token_id] = current_inv_usd
                     results.append(self._make_record(
                         mkt, token_id, Side.BUY, bid_price, bid_result, vol_mult,
                     ))
@@ -184,8 +189,10 @@ class MarketMaking:
             if ask_result.success:
                 new_quotes["ask_id"] = ask_result.order_id
                 if ask_result.filled_size > 0:
-                    current_inv -= ask_result.filled_size
-                    self._inventory[token_id] = current_inv
+                    # Track in USD notional: filled_size * fill_price
+                    fill_usd = ask_result.filled_size * ask_result.fill_price
+                    current_inv_usd -= fill_usd
+                    self._inventory_usd[token_id] = current_inv_usd
                     results.append(self._make_record(
                         mkt, token_id, Side.SELL, ask_price, ask_result, vol_mult,
                     ))
@@ -234,11 +241,11 @@ class MarketMaking:
             "price": round(price, 4),
             "size_usd": round(cfg.mm_order_size_usd, 2),
             "vol_mult": round(vol_mult, 2),
-            "inventory": round(self._inventory.get(token_id, 0), 2),
+            "inventory_usd": round(self._inventory_usd.get(token_id, 0), 2),
             "order_id": result.order_id,
             "success": result.success,
             "mode": result.mode,
         }
 
     def get_inventory_summary(self) -> dict[str, float]:
-        return dict(self._inventory)
+        return dict(self._inventory_usd)

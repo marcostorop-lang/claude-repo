@@ -107,6 +107,7 @@ class BotConfig:
     starting_capital_usd: float = field(default_factory=lambda: _ef("STARTING_CAPITAL_USD", 1000.0))
     max_positions: int = field(default_factory=lambda: _ei("MAX_POSITIONS", 10))
     max_concentration_pct: float = field(default_factory=lambda: _ef("MAX_CONCENTRATION_PCT", 0.25))
+    strategy_daily_loss_limit_usd: float = field(default_factory=lambda: _ef("STRATEGY_DAILY_LOSS_LIMIT_USD", 25.0))
 
     # -- Position exit -------------------------------------------------------
     stop_loss_pct: float = field(default_factory=lambda: _ef("STOP_LOSS_PCT", 0.15))

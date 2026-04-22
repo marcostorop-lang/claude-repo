@@ -14,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 
 import anthropic
 
@@ -56,6 +58,73 @@ Rules for fields:
 - edge_direction: OVER if you think the market overprices YES, UNDER if underprices, FAIR if within noise.
 
 Be concise.  No hedging language.  Give a single point estimate."""
+
+
+# ---------------------------------------------------------------------------
+# A/B testing for system prompt variants (#10)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PromptVariant:
+    """A named system prompt variant for A/B testing."""
+
+    name: str
+    prompt: str
+
+
+class PromptABTester:
+    """Manages A/B testing of system prompt variants.
+
+    Randomly assigns each oracle call to a variant, logs which variant
+    was used, and provides aggregate performance stats.
+    """
+
+    def __init__(self, variants: list[PromptVariant] | None = None) -> None:
+        if variants:
+            self._variants = list(variants)
+        else:
+            self._variants = [PromptVariant(name="default", prompt=_SYSTEM_PROMPT)]
+        # Track outcomes per variant: variant_name → list of (p_claude, p_market, outcome)
+        self._records: dict[str, list[dict]] = defaultdict(list)
+
+    @property
+    def variant_names(self) -> list[str]:
+        return [v.name for v in self._variants]
+
+    def pick_variant(self) -> PromptVariant:
+        """Randomly pick a variant for this call."""
+        return random.choice(self._variants)
+
+    def record(self, variant_name: str, p_claude: float, p_market: float | None = None) -> None:
+        """Record an estimate for a variant."""
+        self._records[variant_name].append({
+            "p_claude": p_claude,
+            "p_market": p_market,
+        })
+
+    def get_variant_stats(self) -> dict[str, dict]:
+        """Return per-variant stats: call count, mean estimate, mean abs edge."""
+        stats: dict[str, dict] = {}
+        for name in self.variant_names:
+            records = self._records.get(name, [])
+            n = len(records)
+            if n == 0:
+                stats[name] = {"calls": 0, "mean_estimate": 0.0, "mean_abs_edge": 0.0}
+                continue
+            mean_est = sum(r["p_claude"] for r in records) / n
+            edges = [
+                abs(r["p_claude"] - r["p_market"])
+                for r in records
+                if r["p_market"] is not None
+            ]
+            mean_edge = sum(edges) / len(edges) if edges else 0.0
+            stats[name] = {
+                "calls": n,
+                "mean_estimate": round(mean_est, 4),
+                "mean_abs_edge": round(mean_edge, 4),
+            }
+        return stats
 
 
 # ---------------------------------------------------------------------------
@@ -158,11 +227,15 @@ class _BudgetTracker:
 class ClaudeOracle:
     """Async wrapper around the Anthropic SDK for probability estimation."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        prompt_variants: list[PromptVariant] | None = None,
+    ) -> None:
         if not cfg.anthropic_api_key:
             logger.warning("ANTHROPIC_API_KEY not set — oracle calls will fail.")
         self._client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
         self.budget = _BudgetTracker()
+        self.ab_tester = PromptABTester(prompt_variants)
 
     async def estimate_probability(
         self,
@@ -178,6 +251,7 @@ class ClaudeOracle:
         """Ask Claude for a calibrated probability estimate.
 
         Returns None on parse failure or API error.
+        A/B testing: randomly selects a prompt variant and logs which was used.
         """
         context_parts = [f"QUESTION: {question}"]
         if description:
@@ -205,6 +279,9 @@ class ClaudeOracle:
                            self.budget.daily_spend, cfg.claude_daily_budget_usd)
             return None
 
+        # A/B testing: pick a prompt variant
+        variant = self.ab_tester.pick_variant()
+
         try:
             resp = await asyncio.to_thread(
                 self._client.messages.create,
@@ -213,7 +290,7 @@ class ClaudeOracle:
                 temperature=cfg.claude_temperature,
                 system=[{
                     "type": "text",
-                    "text": _SYSTEM_PROMPT,
+                    "text": variant.prompt,
                     "cache_control": {"type": "ephemeral"},
                 }],
                 messages=[{"role": "user", "content": user_msg}],
@@ -221,7 +298,19 @@ class ClaudeOracle:
 
             self._record_response_cost(resp)
             raw = resp.content[0].text.strip()
-            return _parse_estimate(raw)
+            estimate = _parse_estimate(raw)
+
+            # Log A/B variant usage
+            if estimate is not None:
+                self.ab_tester.record(
+                    variant.name, estimate.probability, current_price
+                )
+                logger.debug(
+                    "Oracle A/B: variant=%s p=%.3f",
+                    variant.name, estimate.probability,
+                )
+
+            return estimate
 
         except anthropic.RateLimitError:
             logger.warning("Claude rate-limited — backing off.")
