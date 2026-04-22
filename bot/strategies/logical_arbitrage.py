@@ -152,14 +152,22 @@ class LogicalArbitrage:
         return results
 
     def _check_sum_to_one(self, markets: list[MarketInfo]) -> list[dict]:
-        """Check if YES prices in a neg-risk group sum to ~1.0."""
+        """Check if YES prices in a neg-risk group sum to ~1.0.
+
+        Only considers markets that share the same neg_risk_market_id AND
+        are flagged as neg_risk.  This prevents phantom arbs from unrelated
+        markets that happen to be in the same category.
+        """
         total = 0.0
         valid = []
         for m in markets:
-            if m.outcome_prices:
-                yes_price = m.outcome_prices[0]
-                total += yes_price
-                valid.append({"market": m, "yes_price": yes_price})
+            if not m.neg_risk or not m.neg_risk_market_id:
+                continue
+            if not m.outcome_prices:
+                continue
+            yes_price = m.outcome_prices[0]
+            total += yes_price
+            valid.append({"market": m, "yes_price": yes_price})
 
         if len(valid) < 2:
             return []
@@ -290,10 +298,13 @@ class LogicalArbitrage:
                 legs.append((mkt_a, Side.SELL, price_a))
                 legs.append((mkt_b, Side.SELL, price_b))
         elif relation.relation == "complements":
-            # A + B ≈ 1.  If sum != 1, buy the cheap one.
+            # A + B ≈ 1.  If sum < 1, buy both (underpriced); if sum > 1, sell both.
             if price_a + price_b < 1.0 - cfg.logical_arb_min_edge_pct:
-                cheaper = mkt_a if price_a < price_b else mkt_b
-                legs.append((cheaper, Side.BUY, min(price_a, price_b)))
+                legs.append((mkt_a, Side.BUY, price_a))
+                legs.append((mkt_b, Side.BUY, price_b))
+            elif price_a + price_b > 1.0 + cfg.logical_arb_min_edge_pct:
+                legs.append((mkt_a, Side.SELL, price_a))
+                legs.append((mkt_b, Side.SELL, price_b))
 
         for mkt, side, price in legs:
             token_id = mkt.token_ids[0]

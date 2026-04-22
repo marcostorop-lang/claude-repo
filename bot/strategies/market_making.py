@@ -45,7 +45,7 @@ class MarketMaking:
 
         # Cached volatility assessments: token_id → (mult, timestamp)
         self._vol_cache: dict[str, tuple[float, float]] = {}
-        _VOL_CACHE_TTL = 600  # 10 minutes
+        self._vol_cache_ttl = 600  # 10 minutes
 
         # Active quotes: token_id → {"bid_id": ..., "ask_id": ...}
         self._active_quotes: dict[str, dict[str, str]] = {}
@@ -166,12 +166,15 @@ class MarketMaking:
 
         new_quotes: dict[str, str] = {}
 
+        current_inv = net_inv
+
         if not skip_bid:
             bid_result = await place_order(token_id, Side.BUY, bid_price, size_shares)
             if bid_result.success:
                 new_quotes["bid_id"] = bid_result.order_id
                 if bid_result.filled_size > 0:
-                    self._inventory[token_id] = net_inv + bid_result.filled_size
+                    current_inv += bid_result.filled_size
+                    self._inventory[token_id] = current_inv
                     results.append(self._make_record(
                         mkt, token_id, Side.BUY, bid_price, bid_result, vol_mult,
                     ))
@@ -181,7 +184,8 @@ class MarketMaking:
             if ask_result.success:
                 new_quotes["ask_id"] = ask_result.order_id
                 if ask_result.filled_size > 0:
-                    self._inventory[token_id] = self._inventory.get(token_id, 0) - ask_result.filled_size
+                    current_inv -= ask_result.filled_size
+                    self._inventory[token_id] = current_inv
                     results.append(self._make_record(
                         mkt, token_id, Side.SELL, ask_price, ask_result, vol_mult,
                     ))
@@ -195,7 +199,7 @@ class MarketMaking:
         """Get volatility multiplier, with caching."""
         token_id = mkt.token_ids[0] if mkt.token_ids else mkt.condition_id
         cached = self._vol_cache.get(token_id)
-        if cached and (time.time() - cached[1]) < 600:
+        if cached and (time.time() - cached[1]) < self._vol_cache_ttl:
             return cached[0]
 
         mult = await self._oracle.assess_volatility(mkt.question, mkt.description)

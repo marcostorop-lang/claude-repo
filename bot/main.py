@@ -226,6 +226,16 @@ async def _run_bot() -> None:
             except Exception:
                 logger.debug("healthcheck update failed", exc_info=True)
 
+        # Auto-resolve markets (check every 10 cycles to avoid spamming)
+        if cycle % 10 == 0:
+            try:
+                from bot.core.resolution_poller import poll_resolutions
+                resolved = await poll_resolutions()
+                if resolved > 0:
+                    logger.info("Auto-resolved %d estimate(s) this cycle.", resolved)
+            except Exception:
+                logger.debug("Resolution polling failed.", exc_info=True)
+
         # Daily report (once per UTC day)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if today != last_report:

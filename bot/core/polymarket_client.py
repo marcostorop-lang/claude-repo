@@ -1,13 +1,15 @@
 """Polymarket client — wraps py-clob-client + Gamma API.
 
 Handles market discovery (Gamma), orderbook queries, and order
-placement (CLOB).  Paper mode simulates fills at midpoint.
+placement (CLOB).  Paper mode simulates fills with realistic
+slippage and fee modeling.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from typing import Any
 
@@ -17,6 +19,35 @@ from bot.config import cfg
 from bot.core.utils import BookSnapshot, MarketInfo, OrderResult, Side
 
 logger = logging.getLogger(__name__)
+
+_PAPER_FEE_PCT = 0.02
+_PAPER_SLIPPAGE_BPS_MEAN = 30
+_PAPER_SLIPPAGE_BPS_STD = 15
+_PAPER_PARTIAL_FILL_PROB = 0.10
+
+_MAX_RETRIES = 3
+_RETRY_BASE_S = 2.0
+
+
+async def _get_with_retry(
+    client: httpx.AsyncClient, url: str, params: dict | None = None,
+) -> httpx.Response | None:
+    """GET with exponential backoff on transient failures."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = await client.get(url, params=params)
+            if resp.status_code == 429:
+                wait = _RETRY_BASE_S * (2 ** attempt)
+                logger.warning("Rate limited (429), retrying in %.1fs…", wait)
+                await asyncio.sleep(wait)
+                continue
+            return resp
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as exc:
+            wait = _RETRY_BASE_S * (2 ** attempt)
+            logger.warning("HTTP %s, retrying in %.1fs… (%s)", type(exc).__name__, wait, url[:60])
+            await asyncio.sleep(wait)
+    logger.error("All %d retries exhausted for %s", _MAX_RETRIES, url[:60])
+    return None
 
 # ---------------------------------------------------------------------------
 # CLOB client (synchronous SDK → wrapped in executor for async)
@@ -82,8 +113,11 @@ async def fetch_active_markets(
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
+            resp = await _get_with_retry(client, url, params)
+            if resp is None or resp.status_code != 200:
+                if resp is not None:
+                    logger.warning("Gamma API %d: %s", resp.status_code, resp.text[:200])
+                return results
             data = resp.json()
 
         for m in data:
@@ -132,10 +166,8 @@ async def fetch_active_markets(
                     neg_risk_market_id=m.get("negRiskMarketId", "") or "",
                 ))
             except Exception:
-                logger.debug("Skipping malformed market entry.", exc_info=True)
+                logger.warning("Skipping malformed market entry.", exc_info=True)
 
-    except httpx.HTTPStatusError as exc:
-        logger.error("Gamma API %d: %s", exc.response.status_code, exc.response.text[:200])
     except Exception:
         logger.exception("Gamma API request failed.")
 
@@ -214,8 +246,8 @@ async def get_book(token_id: str) -> BookSnapshot:
     try:
         url = f"{cfg.clob_url}/book"
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, params={"token_id": token_id})
-            if resp.status_code != 200:
+            resp = await _get_with_retry(client, url, {"token_id": token_id})
+            if resp is None or resp.status_code != 200:
                 return snap
             data = resp.json()
 
@@ -235,7 +267,7 @@ async def get_book(token_id: str) -> BookSnapshot:
                 for a in asks[:10]
             )
     except Exception:
-        logger.debug("Book fetch failed for %s", token_id[:12], exc_info=True)
+        logger.warning("Book fetch failed for %s", token_id[:12], exc_info=True)
     return snap
 
 
@@ -252,12 +284,30 @@ async def place_order(
 ) -> OrderResult:
     """Place a limit order.  Paper mode simulates an instant fill."""
     if cfg.is_paper:
+        # Realistic paper fills: slippage + fees + occasional partial fills
+        slippage_bps = max(0, random.gauss(_PAPER_SLIPPAGE_BPS_MEAN, _PAPER_SLIPPAGE_BPS_STD))
+        slippage_pct = slippage_bps / 10000.0
+        if side == Side.BUY:
+            fill_price = min(0.99, price * (1.0 + slippage_pct))
+        else:
+            fill_price = max(0.01, price * (1.0 - slippage_pct))
+
+        # Fee deducted from effective price
+        fee = fill_price * _PAPER_FEE_PCT
+        effective_price = fill_price + fee if side == Side.BUY else fill_price - fee
+
+        # 10% chance of partial fill (50-90% of requested size)
+        if random.random() < _PAPER_PARTIAL_FILL_PROB:
+            fill_size = size * random.uniform(0.5, 0.9)
+        else:
+            fill_size = size
+
         return OrderResult(
             success=True,
             order_id=f"paper-{int(time.time()*1000)}",
-            filled_size=size,
-            fill_price=price,
-            message="paper fill",
+            filled_size=round(fill_size, 4),
+            fill_price=round(effective_price, 6),
+            message=f"paper fill (slip={slippage_bps:.0f}bps fee={_PAPER_FEE_PCT:.0%})",
             mode="paper",
         )
 

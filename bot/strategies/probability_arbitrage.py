@@ -124,6 +124,7 @@ class ProbabilityArbitrage:
         )
 
         # Persist every estimate for calibration tracking — whether we trade or not.
+        # Keep raw_edge (signed) so we can analyse directional bias.
         calibration.record_estimate(
             strategy=self.name,
             condition_id=mkt.condition_id,
@@ -132,7 +133,7 @@ class ProbabilityArbitrage:
             p_claude=estimate.probability,
             p_market=midpoint,
             confidence=estimate.confidence,
-            edge=net_edge,
+            edge=raw_edge,
             edge_direction=estimate.edge_direction,
             reasoning=estimate.reasoning,
         )
@@ -161,6 +162,7 @@ class ProbabilityArbitrage:
             price=price,
             edge=net_edge,
             confidence=estimate.confidence,
+            probability=estimate.probability,
             reason=estimate.reasoning,
             features={
                 "p_claude": estimate.probability,

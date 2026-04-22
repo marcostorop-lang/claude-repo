@@ -28,7 +28,8 @@ class TradeSignal:
     side: Side
     price: float
     edge: float  # signed: positive means we think price is too low
-    confidence: float  # 0–1
+    confidence: float  # 0–1: Claude's confidence in its own estimate
+    probability: float = 0.5  # Claude's estimated TRUE probability
     size_usd: float = 0.0  # filled by risk manager
     reason: str = ""
     features: dict[str, Any] = field(default_factory=dict)
@@ -133,6 +134,11 @@ def kelly_size(
     max_bet: float = 100.0,
 ) -> float:
     """Half-Kelly sizing for a binary bet.
+
+    Parameters:
+      edge     — absolute |P_estimate - P_market|, after fees
+      win_prob — our estimated TRUE probability of the event (NOT confidence)
+      fraction — Kelly fraction (0.5 = half-Kelly)
 
     f* = (p * b - q) / b   where b = 1/price - 1, q = 1 - p.
     Returns USD amount, clamped to [0, max_bet].

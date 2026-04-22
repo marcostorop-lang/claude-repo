@@ -39,6 +39,7 @@ class TestRiskManager:
             price=0.50,
             edge=0.10,
             confidence=0.70,
+            probability=0.60,
         )
         defaults.update(overrides)
         return TradeSignal(**defaults)

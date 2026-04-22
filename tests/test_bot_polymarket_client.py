@@ -174,13 +174,25 @@ def test_get_book_handles_non_200():
 
 
 def test_place_order_paper_mode_simulates_fill():
-    """In paper mode, orders always return success with instant fill."""
+    """In paper mode, orders return success with realistic fills."""
     result = asyncio.run(pc.place_order("tok1", Side.BUY, 0.5, 10))
     assert result.success is True
     assert result.mode == "paper"
-    assert result.filled_size == 10
-    assert result.fill_price == 0.5
     assert result.order_id.startswith("paper-")
+    # Realistic paper fills include slippage + fees
+    assert result.fill_price > 0.5  # BUY slippage pushes price up
+    assert result.fill_price < 0.55  # but not outrageously
+    assert result.filled_size <= 10  # partial fills possible
+    assert result.filled_size > 0
+    assert "slip=" in result.message
+    assert "fee=" in result.message
+
+
+def test_place_order_paper_sell_slippage_pushes_down():
+    """SELL fills should have price pushed down by slippage."""
+    results = [asyncio.run(pc.place_order("tok1", Side.SELL, 0.5, 10)) for _ in range(20)]
+    avg_price = sum(r.fill_price for r in results) / len(results)
+    assert avg_price < 0.5  # SELL slippage on average pushes fill price below limit
 
 
 def test_cancel_order_paper_is_noop():

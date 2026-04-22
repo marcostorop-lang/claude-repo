@@ -210,11 +210,12 @@ class RiskManager:
         if signal.side == Side.BUY and self.position_count >= cfg.max_positions:
             return _reject(f"Max positions ({cfg.max_positions}) reached.")
 
-        # Compute Kelly size
+        # Compute Kelly size — win_prob is the TRUE probability estimate,
+        # NOT the confidence score.
         raw_size = kelly_size(
             edge=abs(signal.edge),
-            win_prob=signal.confidence,
-            fraction=cfg.kelly_fraction,
+            win_prob=signal.probability,
+            fraction=cfg.kelly_fraction * min(signal.confidence, 1.0),
             bankroll=self._current_equity,
             max_bet=cfg.max_position_usd,
         )
