@@ -4,10 +4,14 @@ Scan high-volume active markets, ask Claude for an independent
 probability estimate, and trade when |P_claude - P_market| > min_edge
 (after fees).
 
+Competitive edge: enriches Claude with real-time news + category-specific
+data (crypto prices, polling data) so it has information the market
+hasn't priced in yet.  Evaluates markets in parallel for speed.
+
 Flow per tick:
   1. Fetch top-N active markets from Gamma API.
-  2. For each, get orderbook midpoint.
-  3. Ask ClaudeOracle for a probability estimate.
+  2. Pre-fetch all orderbooks in parallel.
+  3. For each (parallel, bounded): fetch news + data, ask Claude.
   4. If edge > threshold: emit a TradeSignal.
   5. RiskManager sizes and approves.
   6. Place order via PolymarketClient.
@@ -28,7 +32,7 @@ from bot.core.polymarket_client import (
     place_order,
 )
 from bot.core.risk_manager import RiskManager
-from bot.core.utils import LatencyTracker, MarketInfo, Side, TradeSignal
+from bot.core.utils import BookSnapshot, LatencyTracker, MarketInfo, Side, TradeSignal
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +42,21 @@ class ProbabilityArbitrage:
 
     name = "prob_arb"
 
-    def __init__(self, oracle: ClaudeOracle, risk: RiskManager) -> None:
+    def __init__(
+        self,
+        oracle: ClaudeOracle,
+        risk: RiskManager,
+        news_fetcher=None,
+        data_router=None,
+    ) -> None:
         self._oracle = oracle
         self._risk = risk
         self._last_scan = 0.0
         self._trades_session: list[dict] = []
         self._latency_tracker = LatencyTracker(window=200)
-        self._min_edge_override: float | None = None  # for regime detection
+        self._min_edge_override: float | None = None
+        self._news_fetcher = news_fetcher
+        self._data_router = data_router
 
     @property
     def latency_tracker(self) -> LatencyTracker:
@@ -59,6 +71,11 @@ class ProbabilityArbitrage:
 
         if self._risk.is_halted:
             logger.info("[prob_arb] Risk halted — skipping scan.")
+            return []
+
+        # Per-strategy circuit breaker
+        if self._risk.is_strategy_paused(self.name):
+            logger.info("[prob_arb] Strategy paused (daily loss limit) — skipping.")
             return []
 
         logger.info("[prob_arb] Scanning active markets…")
@@ -90,34 +107,58 @@ class ProbabilityArbitrage:
         except Exception:
             self._min_edge_override = None
 
-        results: list[dict] = []
-        for mkt in markets:
+        # Pre-fetch all orderbooks in parallel for speed
+        eligible = [m for m in markets if m.token_ids and m.outcome_prices]
+        book_tasks = [get_book(m.token_ids[0]) for m in eligible]
+        book_results = await asyncio.gather(*book_tasks, return_exceptions=True)
+
+        books: dict[str, BookSnapshot] = {}
+        for mkt, book_or_exc in zip(eligible, book_results):
+            if isinstance(book_or_exc, BaseException):
+                continue
+            books[mkt.token_ids[0]] = book_or_exc
+
+        # Evaluate markets in parallel (bounded by semaphore)
+        sem = asyncio.Semaphore(cfg.speed_parallel_evaluations)
+
+        async def _bounded_eval(mkt: MarketInfo) -> dict | None:
             if self._risk.is_halted:
-                break
-            try:
-                record = await self._evaluate_market(mkt)
-                if record:
-                    results.append(record)
-            except Exception:
-                logger.exception("[prob_arb] Error evaluating %s", mkt.condition_id[:12])
-            await asyncio.sleep(1)  # rate-limit courtesy
+                return None
+            async with sem:
+                try:
+                    token_id = mkt.token_ids[0] if mkt.token_ids else ""
+                    book = books.get(token_id)
+                    return await self._evaluate_market(mkt, book)
+                except Exception:
+                    logger.exception("[prob_arb] Error evaluating %s", mkt.condition_id[:12])
+                    return None
+
+        eval_results = await asyncio.gather(
+            *[_bounded_eval(m) for m in eligible],
+            return_exceptions=True,
+        )
+
+        results = [r for r in eval_results if isinstance(r, dict)]
 
         if results:
             logger.info("[prob_arb] Cycle produced %d trade(s).", len(results))
         return results
 
-    async def _evaluate_market(self, mkt: MarketInfo) -> dict | None:
+    async def _evaluate_market(
+        self,
+        mkt: MarketInfo,
+        pre_fetched_book: BookSnapshot | None = None,
+    ) -> dict | None:
         if not mkt.token_ids or not mkt.outcome_prices:
             return None
 
-        # Use the YES token (index 0)
         yes_token = mkt.token_ids[0]
         market_price = mkt.outcome_prices[0]
 
         if market_price <= 0.02 or market_price >= 0.98:
-            return None  # near-certain / near-zero — no edge
+            return None
 
-        book = await get_book(yes_token)
+        book = pre_fetched_book or await get_book(yes_token)
         midpoint = book.midpoint or market_price
 
         book_summary = (
@@ -126,7 +167,27 @@ class ProbabilityArbitrage:
             f"bid_depth=${book.bid_depth_usd:.0f} ask_depth=${book.ask_depth_usd:.0f}"
         )
 
-        # Record timestamp when oracle call starts (signal time)
+        # Fetch real-time news and data for competitive edge
+        news_context = ""
+        data_context = ""
+
+        if self._news_fetcher is not None:
+            try:
+                items = await self._news_fetcher.fetch_relevant_news(
+                    mkt.question, mkt.category, max_items=cfg.news_max_items,
+                )
+                news_context = self._news_fetcher.format_for_oracle(items)
+            except Exception:
+                logger.debug("[prob_arb] News fetch failed for %s", mkt.question[:40])
+
+        if self._data_router is not None:
+            try:
+                data_context = await self._data_router.enrich(
+                    mkt.question, mkt.description, mkt.category, mkt.tags,
+                )
+            except Exception:
+                logger.debug("[prob_arb] Data feed failed for %s", mkt.question[:40])
+
         t_signal = time.time()
 
         estimate = await self._oracle.estimate_probability(
@@ -138,6 +199,8 @@ class ProbabilityArbitrage:
             category=mkt.category,
             end_date=mkt.end_date,
             book_summary=book_summary,
+            news_context=news_context,
+            data_context=data_context,
         )
         if estimate is None:
             return None
@@ -147,13 +210,12 @@ class ProbabilityArbitrage:
         net_edge = abs_edge - cfg.prob_arb_fee_pct
 
         logger.info(
-            "[prob_arb] %s | P_claude=%.3f P_market=%.3f edge=%.3f net=%.3f conf=%.2f",
+            "[prob_arb] %s | P_claude=%.3f P_market=%.3f edge=%.3f net=%.3f conf=%.2f%s",
             mkt.question[:60], estimate.probability, midpoint,
             raw_edge, net_edge, estimate.confidence,
+            " [+news]" if news_context else "",
         )
 
-        # Persist every estimate for calibration tracking — whether we trade or not.
-        # Keep raw_edge (signed) so we can analyse directional bias.
         calibration.record_estimate(
             strategy=self.name,
             condition_id=mkt.condition_id,
@@ -167,7 +229,6 @@ class ProbabilityArbitrage:
             reasoning=estimate.reasoning,
         )
 
-        # Apply regime-adjusted edge threshold if set
         min_edge = self._min_edge_override if self._min_edge_override is not None else cfg.prob_arb_min_edge_pct
 
         if net_edge < min_edge:
@@ -176,7 +237,6 @@ class ProbabilityArbitrage:
             logger.debug("[prob_arb] Confidence %.2f below threshold.", estimate.confidence)
             return None
 
-        # Direction: if Claude thinks higher → BUY YES; lower → SELL YES (= BUY NO)
         if raw_edge > 0:
             side = Side.BUY
             token_id = yes_token
@@ -204,6 +264,8 @@ class ProbabilityArbitrage:
                 "net_edge": net_edge,
                 "edge_direction": estimate.edge_direction,
                 "key_factors": estimate.key_factors,
+                "has_news": bool(news_context),
+                "has_data": bool(data_context),
             },
         )
 
@@ -216,9 +278,9 @@ class ProbabilityArbitrage:
         if size_shares <= 0:
             return None
 
-        result = await place_order(token_id, side, price, size_shares)
+        # Pass book for depth-aware slippage
+        result = await place_order(token_id, side, price, size_shares, book=book)
 
-        # Record fill time and compute latency
         t_fill = time.time()
         latency_s = t_fill - t_signal
         self._latency_tracker.record(latency_s)
@@ -240,6 +302,8 @@ class ProbabilityArbitrage:
             "success": result.success,
             "mode": result.mode,
             "signal_to_fill_ms": round(latency_s * 1000, 1),
+            "has_news": bool(news_context),
+            "has_data": bool(data_context),
         }
 
         if result.success:

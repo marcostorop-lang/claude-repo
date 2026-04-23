@@ -126,6 +126,22 @@ class BotConfig:
     telegram_chat_id: str = field(default_factory=lambda: _e("TELEGRAM_CHAT_ID"))
     discord_webhook_url: str = field(default_factory=lambda: _e("DISCORD_WEBHOOK_URL"))
 
+    # -- News feed ---------------------------------------------------------------
+    news_feed_enabled: bool = field(default_factory=lambda: _eb("NEWS_FEED_ENABLED", True))
+    newsapi_key: str = field(default_factory=lambda: _e("NEWSAPI_KEY"))
+    news_max_age_hours: float = field(default_factory=lambda: _ef("NEWS_MAX_AGE_HOURS", 4.0))
+    news_max_items: int = field(default_factory=lambda: _ei("NEWS_MAX_ITEMS", 5))
+
+    # -- Data feeds --------------------------------------------------------------
+    data_feeds_enabled: bool = field(default_factory=lambda: _eb("DATA_FEEDS_ENABLED", True))
+    coingecko_api_url: str = field(default_factory=lambda: _e("COINGECKO_API_URL", "https://api.coingecko.com/api/v3"))
+    defillama_api_url: str = field(default_factory=lambda: _e("DEFILLAMA_API_URL", "https://api.llama.fi"))
+
+    # -- Speed optimizations -----------------------------------------------------
+    speed_parallel_evaluations: int = field(default_factory=lambda: _ei("SPEED_PARALLEL_EVALUATIONS", 3))
+    speed_book_cache_ttl_s: float = field(default_factory=lambda: _ef("SPEED_BOOK_CACHE_TTL", 15.0))
+    speed_market_cache_ttl_s: float = field(default_factory=lambda: _ef("SPEED_MARKET_CACHE_TTL", 30.0))
+
     # -- Logging --------------------------------------------------------------
     log_level: str = field(default_factory=lambda: _e("LOG_LEVEL", "INFO"))
     log_file: str = field(default_factory=lambda: _e("LOG_FILE", "logs/bot.log"))

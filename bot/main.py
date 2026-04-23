@@ -156,11 +156,33 @@ async def _run_bot() -> None:
     oracle = ClaudeOracle()
     risk = RiskManager()
 
+    # Build competitive edge: news + data feeds
+    news_fetcher = None
+    data_router = None
+    try:
+        if cfg.news_feed_enabled:
+            from bot.core.news_feed import NewsFetcher
+            news_fetcher = NewsFetcher()
+            logger.info("News feed enabled — Claude will receive real-time headlines.")
+    except Exception:
+        logger.warning("News feed initialization failed.", exc_info=True)
+    try:
+        if cfg.data_feeds_enabled:
+            from bot.core.data_feeds import DataFeedRouter
+            data_router = DataFeedRouter()
+            logger.info("Data feeds enabled — Claude will receive category-specific data.")
+    except Exception:
+        logger.warning("Data feed initialization failed.", exc_info=True)
+
     # Build strategies
     strategies = []
     if cfg.strategy_probability_arb:
         from bot.strategies.probability_arbitrage import ProbabilityArbitrage
-        strategies.append(ProbabilityArbitrage(oracle, risk))
+        strategies.append(ProbabilityArbitrage(
+            oracle, risk,
+            news_fetcher=news_fetcher,
+            data_router=data_router,
+        ))
     if cfg.strategy_logical_arb:
         from bot.strategies.logical_arbitrage import LogicalArbitrage
         strategies.append(LogicalArbitrage(oracle, risk))

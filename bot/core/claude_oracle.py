@@ -247,6 +247,8 @@ class ClaudeOracle:
         category: str = "",
         end_date: str = "",
         book_summary: str = "",
+        news_context: str = "",
+        data_context: str = "",
     ) -> OracleEstimate | None:
         """Ask Claude for a calibrated probability estimate.
 
@@ -266,6 +268,10 @@ class ClaudeOracle:
             context_parts.append(f"LIQUIDITY: ${liquidity:,.0f}")
         if book_summary:
             context_parts.append(f"ORDERBOOK: {book_summary}")
+        if news_context:
+            context_parts.append(news_context)
+        if data_context:
+            context_parts.append(f"SUPPLEMENTARY DATA:\n{data_context}")
         if current_price is not None:
             context_parts.append(
                 f"CURRENT MARKET PRICE (YES): {current_price:.4f} "
