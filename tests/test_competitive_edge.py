@@ -264,3 +264,190 @@ class TestConfigFields:
         assert hasattr(cfg, "speed_parallel_evaluations")
         assert hasattr(cfg, "speed_book_cache_ttl_s")
         assert cfg.speed_parallel_evaluations >= 1
+
+    def test_espn_config_exists(self):
+        from bot.config import cfg
+        assert hasattr(cfg, "espn_api_url")
+        assert "espn" in cfg.espn_api_url
+
+
+# ===========================================================================
+# Expanded data feeds — new categories
+# ===========================================================================
+
+
+class TestSportsDataFeed:
+    def test_detect_sport_nba(self):
+        from bot.core.data_feeds import SportsDataFeed
+        feed = SportsDataFeed()
+        sport, league = feed._detect_sport("Will the Lakers win the NBA championship?")
+        assert sport == "basketball"
+        assert league == "nba"
+
+    def test_detect_sport_nfl(self):
+        from bot.core.data_feeds import SportsDataFeed
+        feed = SportsDataFeed()
+        sport, league = feed._detect_sport("Will the Chiefs win the NFL Super Bowl?")
+        assert sport == "football"
+        assert league == "nfl"
+
+    def test_detect_sport_none(self):
+        from bot.core.data_feeds import SportsDataFeed
+        feed = SportsDataFeed()
+        sport, league = feed._detect_sport("Will it rain tomorrow?")
+        assert sport == ""
+
+    def test_detect_sport_team_name(self):
+        from bot.core.data_feeds import SportsDataFeed
+        feed = SportsDataFeed()
+        sport, league = feed._detect_sport("Will the Celtics win tonight?")
+        assert sport == "basketball"
+
+
+class TestFinancialDataFeed:
+    def test_extract_tickers_by_name(self):
+        from bot.core.data_feeds import FinancialDataFeed
+        feed = FinancialDataFeed()
+        tickers = feed._extract_tickers("Will Tesla stock exceed $300?")
+        assert "TSLA" in tickers
+
+    def test_extract_tickers_by_symbol(self):
+        from bot.core.data_feeds import FinancialDataFeed
+        feed = FinancialDataFeed()
+        tickers = feed._extract_tickers("Will $NVDA hit $200 by year end?")
+        assert "NVDA" in tickers
+
+    def test_extract_tickers_multiple(self):
+        from bot.core.data_feeds import FinancialDataFeed
+        feed = FinancialDataFeed()
+        tickers = feed._extract_tickers("Apple vs Microsoft earnings comparison")
+        assert "AAPL" in tickers
+        assert "MSFT" in tickers
+
+    def test_extract_tickers_none(self):
+        from bot.core.data_feeds import FinancialDataFeed
+        feed = FinancialDataFeed()
+        tickers = feed._extract_tickers("Will it rain tomorrow?")
+        assert tickers == []
+
+
+class TestPoliticsBaseRates:
+    def test_base_rate_confirmation(self):
+        from bot.core.data_feeds import PoliticsDataFeed
+        feed = PoliticsDataFeed()
+        result = feed._estimate_base_rate("Will the Senate confirm the nominee?")
+        assert "85%" in result
+
+    def test_base_rate_reelection(self):
+        from bot.core.data_feeds import PoliticsDataFeed
+        feed = PoliticsDataFeed()
+        result = feed._estimate_base_rate("Will the incumbent win reelection?")
+        assert "67%" in result
+
+    def test_base_rate_no_match(self):
+        from bot.core.data_feeds import PoliticsDataFeed
+        feed = PoliticsDataFeed()
+        result = feed._estimate_base_rate("Will it rain tomorrow?")
+        assert result == ""
+
+
+class TestDataFeedRouterExpanded:
+    def test_resolve_finance(self):
+        from bot.core.data_feeds import DataFeedRouter
+        router = DataFeedRouter()
+        assert router._resolve_category("", "Will Tesla stock hit $300?", []) == "finance"
+        assert router._resolve_category("", "Nasdaq reaches all-time high?", []) == "finance"
+
+    def test_resolve_sports(self):
+        from bot.core.data_feeds import DataFeedRouter
+        router = DataFeedRouter()
+        assert router._resolve_category("", "Will the NBA finals go to game 7?", []) == "sports"
+
+    def test_finance_feed_in_router(self):
+        from bot.core.data_feeds import DataFeedRouter
+        router = DataFeedRouter()
+        assert "finance" in router._feeds
+
+
+class TestExpandedCoinMap:
+    def test_new_coins(self):
+        from bot.core.data_feeds import CryptoDataFeed
+        feed = CryptoDataFeed()
+        assert "pepe" in feed._extract_coin_ids("Will PEPE reach $0.01?")
+        assert "the-open-network" in feed._extract_coin_ids("TON price prediction")
+        assert "sui" in feed._extract_coin_ids("SUI network TVL growth")
+        assert "arbitrum" in feed._extract_coin_ids("ARB token airdrop")
+
+
+# ===========================================================================
+# Prompt engineering — A/B testing with two variants
+# ===========================================================================
+
+
+class TestPromptVariants:
+    def test_two_default_variants(self):
+        from bot.core.claude_oracle import PromptABTester
+        tester = PromptABTester()
+        assert len(tester.variant_names) == 2
+        assert "structured_v1" in tester.variant_names
+        assert "aggressive_v2" in tester.variant_names
+
+    def test_v1_has_few_shot_examples(self):
+        from bot.core.claude_oracle import _SYSTEM_PROMPT
+        assert "STEP 1" in _SYSTEM_PROMPT
+        assert "BASE RATE" in _SYSTEM_PROMPT
+        assert "EXAMPLE 1" in _SYSTEM_PROMPT
+        assert "ANTI-ANCHORING" in _SYSTEM_PROMPT
+
+    def test_v2_is_shorter_and_aggressive(self):
+        from bot.core.claude_oracle import _SYSTEM_PROMPT, _SYSTEM_PROMPT_V2
+        assert len(_SYSTEM_PROMPT_V2) < len(_SYSTEM_PROMPT)
+        assert "mispricings" in _SYSTEM_PROMPT_V2.lower()
+        assert "Find the edge" in _SYSTEM_PROMPT_V2
+
+
+# ===========================================================================
+# Backtesting — new features
+# ===========================================================================
+
+
+class TestBacktestDataClasses:
+    def test_market_spec(self):
+        from bot.backtest.engine import MarketSpec
+        spec = MarketSpec(token_id="abc", condition_id="xyz", question="Test?")
+        assert spec.token_id == "abc"
+        assert spec.category == ""
+
+    def test_portfolio_result(self):
+        from bot.backtest.engine import PortfolioBacktestResult
+        r = PortfolioBacktestResult()
+        assert r.markets_tested == 0
+        assert r.equity_curve == []
+
+    def test_walk_forward_result(self):
+        from bot.backtest.engine import WalkForwardResult
+        r = WalkForwardResult()
+        assert r.is_overfit is False
+        assert r.windows == []
+
+
+class TestBacktestReports:
+    def test_format_portfolio_report(self):
+        from bot.backtest.engine import PortfolioBacktestResult, format_portfolio_report
+        r = PortfolioBacktestResult(
+            markets_tested=3, total_trades=10, total_pnl=42.5,
+            portfolio_sharpe=1.2, max_drawdown=0.05, win_rate=0.6,
+            profit_factor=1.8, avg_trade_pnl=4.25,
+        )
+        report = format_portfolio_report(r)
+        assert "PORTFOLIO BACKTEST" in report
+        assert "42.50" in report
+        assert "1.2" in report
+
+    def test_format_walk_forward_report(self):
+        from bot.backtest.engine import WalkForwardResult, format_walk_forward_report
+        r = WalkForwardResult(aggregate_pnl=15.0, aggregate_sharpe=0.8, is_overfit=False)
+        report = format_walk_forward_report(r)
+        assert "WALK-FORWARD" in report
+        assert "15.00" in report
+        assert "NO" in report

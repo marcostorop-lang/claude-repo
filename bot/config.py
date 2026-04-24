@@ -136,6 +136,7 @@ class BotConfig:
     data_feeds_enabled: bool = field(default_factory=lambda: _eb("DATA_FEEDS_ENABLED", True))
     coingecko_api_url: str = field(default_factory=lambda: _e("COINGECKO_API_URL", "https://api.coingecko.com/api/v3"))
     defillama_api_url: str = field(default_factory=lambda: _e("DEFILLAMA_API_URL", "https://api.llama.fi"))
+    espn_api_url: str = field(default_factory=lambda: _e("ESPN_API_URL", "https://site.api.espn.com/apis/site/v2/sports"))
 
     # -- Speed optimizations -----------------------------------------------------
     speed_parallel_evaluations: int = field(default_factory=lambda: _ei("SPEED_PARALLEL_EVALUATIONS", 3))

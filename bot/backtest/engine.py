@@ -1,16 +1,19 @@
-"""Simple backtesting engine.
+"""Backtesting engine — single-market, multi-market portfolio, and walk-forward.
 
 Replays historical price data from the Polymarket Data API and
 simulates the probability arbitrage strategy with recorded Claude
 estimates (or re-queries Claude for each point).
 
-This is a *stub* — production backtesting needs tick-level book data,
-realistic fill simulation, and latency modelling.  This module exists
-so the operator can do a quick sanity check before going live.
+Extended features:
+- Multi-market portfolio backtesting (run_portfolio_backtest)
+- Resolved-market discovery (fetch_resolved_markets)
+- Walk-forward validation (walk_forward_backtest)
+- CLI entry point (python -m bot.backtest.engine)
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -57,6 +60,37 @@ class BacktestResult:
     sharpe_ratio: float = 0.0
     avg_trade_duration_bars: float = 0.0
     profit_factor: float = 0.0
+
+
+@dataclass
+class MarketSpec:
+    token_id: str
+    condition_id: str
+    question: str = ""
+    category: str = ""
+
+
+@dataclass
+class PortfolioBacktestResult:
+    markets_tested: int = 0
+    total_trades: int = 0
+    total_pnl: float = 0.0
+    portfolio_sharpe: float = 0.0
+    max_drawdown: float = 0.0
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    avg_trade_pnl: float = 0.0
+    per_market: list[BacktestResult] = field(default_factory=list)
+    equity_curve: list[float] = field(default_factory=list)
+
+
+@dataclass
+class WalkForwardResult:
+    windows: list[BacktestResult] = field(default_factory=list)
+    aggregate_pnl: float = 0.0
+    aggregate_sharpe: float = 0.0
+    aggregate_win_rate: float = 0.0
+    is_overfit: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -322,3 +356,359 @@ def format_backtest_report(result: BacktestResult) -> str:
         f"  Profit factor: {result.profit_factor:.2f}" if result.profit_factor != float("inf") else "  Profit factor: inf (no losses)",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Resolved market discovery
+# ---------------------------------------------------------------------------
+
+
+async def fetch_resolved_markets(
+    limit: int = 50,
+    min_volume: float = 10000.0,
+) -> list[MarketSpec]:
+    """Fetch resolved markets from the Polymarket Gamma API for backtesting."""
+    url = f"{cfg.gamma_url}/events"
+    params = {
+        "active": "false",
+        "closed": "true",
+        "limit": str(min(limit * 2, 200)),
+        "order": "volume",
+        "ascending": "false",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.warning("Gamma API returned %d for resolved markets.", resp.status_code)
+                return []
+            data = resp.json()
+    except Exception:
+        logger.exception("Failed to fetch resolved markets.")
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    specs: list[MarketSpec] = []
+    for event in data:
+        markets = event.get("markets", [])
+        for mkt in markets:
+            vol = float(mkt.get("volume", 0) or 0)
+            if vol < min_volume:
+                continue
+            token_ids = mkt.get("clobTokenIds", [])
+            if not token_ids:
+                continue
+            specs.append(MarketSpec(
+                token_id=token_ids[0],
+                condition_id=mkt.get("conditionId", ""),
+                question=mkt.get("question", event.get("title", ""))[:100],
+                category=mkt.get("groupItemTitle", ""),
+            ))
+            if len(specs) >= limit:
+                return specs
+    return specs
+
+
+# ---------------------------------------------------------------------------
+# Multi-market portfolio backtest
+# ---------------------------------------------------------------------------
+
+
+async def run_portfolio_backtest(
+    markets: list[MarketSpec],
+    *,
+    edge_threshold: float = 0.05,
+    kelly_frac: float = 0.5,
+    starting_capital: float = 1000.0,
+    max_concurrent: int = 5,
+) -> PortfolioBacktestResult:
+    """Run backtests across multiple markets and aggregate portfolio metrics."""
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _run_one(spec: MarketSpec) -> BacktestResult:
+        async with sem:
+            return await run_backtest(
+                token_id=spec.token_id,
+                condition_id=spec.condition_id,
+                question=spec.question,
+                edge_threshold=edge_threshold,
+                kelly_frac=kelly_frac,
+                starting_capital=starting_capital / max(len(markets), 1),
+            )
+
+    results = await asyncio.gather(*[_run_one(m) for m in markets], return_exceptions=True)
+
+    per_market: list[BacktestResult] = []
+    all_trades: list[BacktestTrade] = []
+    all_returns: list[float] = []
+
+    for r in results:
+        if isinstance(r, BaseException):
+            continue
+        per_market.append(r)
+        all_trades.extend(r.trades)
+        for t in r.trades:
+            if t.size_usd > 0:
+                all_returns.append(t.pnl / t.size_usd)
+
+    total_pnl = sum(r.total_pnl for r in per_market)
+    total_wins = sum(r.win_count for r in per_market)
+    total_losses = sum(r.loss_count for r in per_market)
+    total_count = total_wins + total_losses
+
+    # Portfolio Sharpe
+    portfolio_sharpe = 0.0
+    if len(all_returns) >= 2:
+        mean_ret = sum(all_returns) / len(all_returns)
+        var = sum((r - mean_ret) ** 2 for r in all_returns) / (len(all_returns) - 1)
+        std_ret = math.sqrt(var) if var > 0 else 0.0
+        portfolio_sharpe = (mean_ret / std_ret * math.sqrt(252)) if std_ret > 0 else 0.0
+
+    # Portfolio max drawdown (sum PnLs chronologically)
+    equity = starting_capital
+    peak = equity
+    max_dd = 0.0
+    equity_curve = [equity]
+    sorted_trades = sorted(all_trades, key=lambda t: t.timestamp)
+    for t in sorted_trades:
+        equity += t.pnl
+        equity_curve.append(round(equity, 2))
+        peak = max(peak, equity)
+        dd = (peak - equity) / peak if peak > 0 else 0
+        max_dd = max(max_dd, dd)
+
+    # Profit factor
+    gross_profit = sum(t.pnl for t in all_trades if t.pnl > 0)
+    gross_loss = abs(sum(t.pnl for t in all_trades if t.pnl < 0))
+    pf = (gross_profit / gross_loss) if gross_loss > 0 else (float("inf") if gross_profit > 0 else 0.0)
+
+    return PortfolioBacktestResult(
+        markets_tested=len(per_market),
+        total_trades=total_count,
+        total_pnl=round(total_pnl, 2),
+        portfolio_sharpe=round(portfolio_sharpe, 3),
+        max_drawdown=round(max_dd, 4),
+        win_rate=round(total_wins / total_count, 4) if total_count > 0 else 0.0,
+        profit_factor=round(pf, 3) if pf != float("inf") else float("inf"),
+        avg_trade_pnl=round(total_pnl / total_count, 4) if total_count > 0 else 0.0,
+        per_market=per_market,
+        equity_curve=equity_curve,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward validation
+# ---------------------------------------------------------------------------
+
+
+async def walk_forward_backtest(
+    token_id: str,
+    condition_id: str,
+    question: str = "",
+    *,
+    n_windows: int = 5,
+    train_pct: float = 0.7,
+    edge_threshold: float = 0.05,
+    kelly_frac: float = 0.5,
+    starting_capital: float = 1000.0,
+) -> WalkForwardResult:
+    """Walk-forward validation: train/test split across time windows.
+
+    Prevents overfitting by evaluating out-of-sample performance.
+    """
+    history = await fetch_price_history(token_id)
+    if len(history) < 50:
+        return WalkForwardResult()
+
+    prices = [float(p.get("price", p.get("p", 0))) for p in history if "price" in p or "p" in p]
+    timestamps = [p.get("t", p.get("timestamp", "")) for p in history]
+
+    if len(prices) < 50:
+        return WalkForwardResult()
+
+    window_size = len(prices) // n_windows
+    if window_size < 20:
+        n_windows = max(2, len(prices) // 20)
+        window_size = len(prices) // n_windows
+
+    windows: list[BacktestResult] = []
+    in_sample_pnls: list[float] = []
+    out_sample_pnls: list[float] = []
+
+    for w in range(n_windows):
+        start = w * window_size
+        end = min(start + window_size, len(prices))
+        if end - start < 20:
+            continue
+
+        train_end = start + int((end - start) * train_pct)
+        train_prices = prices[start:train_end]
+        test_prices = prices[train_end:end]
+
+        if len(train_prices) < 10 or len(test_prices) < 5:
+            continue
+
+        # Train: compute optimal edge threshold from training data
+        train_mean = sum(train_prices) / len(train_prices)
+        train_vol = math.sqrt(sum((p - train_mean) ** 2 for p in train_prices) / len(train_prices)) if len(train_prices) > 1 else 0.01
+        adapted_threshold = max(edge_threshold, train_vol * 0.5)
+
+        # Test: run backtest on test window with adapted threshold
+        test_history = [{"price": p, "t": timestamps[train_end + i] if (train_end + i) < len(timestamps) else ""} for i, p in enumerate(test_prices)]
+
+        result = BacktestResult(market_question=f"Window {w+1}/{n_windows}: {question[:40]}")
+        equity = starting_capital / n_windows
+        peak = equity
+        position = None
+        entry_bar = 0
+        test_window = 10
+
+        if len(test_prices) < test_window + 2:
+            continue
+
+        for i in range(test_window, len(test_prices)):
+            mean = sum(test_prices[i - test_window:i]) / test_window
+            current = test_prices[i]
+
+            if position is None:
+                edge = abs(current - mean)
+                if edge <= adapted_threshold:
+                    continue
+                side = "BUY" if current < mean else "SELL"
+                size = kelly_size(edge=edge, win_prob=0.55 + edge * 0.5, fraction=kelly_frac, bankroll=equity, max_bet=equity * 0.1)
+                if size > 0:
+                    fill_price = _apply_fee_and_slippage(current, side)
+                    position = BacktestTrade(timestamp="", side=side, price=fill_price, size_usd=size, edge=edge)
+                    entry_bar = i
+            else:
+                bars_held = i - entry_bar
+                revert = (position.side == "BUY" and current >= mean) or (position.side == "SELL" and current <= mean)
+                if bars_held >= 5 or revert:
+                    exit_price = _apply_fee_and_slippage(current, "SELL" if position.side == "BUY" else "BUY")
+                    pnl = ((exit_price - position.price) if position.side == "BUY" else (position.price - exit_price)) * (position.size_usd / position.price)
+                    position.pnl = pnl
+                    position.closed = True
+                    position.bars_held = bars_held
+                    result.trades.append(position)
+                    equity += pnl
+                    peak = max(peak, equity)
+                    dd = (peak - equity) / peak if peak > 0 else 0
+                    result.max_drawdown = max(result.max_drawdown, dd)
+                    if pnl > 0:
+                        result.win_count += 1
+                    else:
+                        result.loss_count += 1
+                    position = None
+
+        result.total_pnl = sum(t.pnl for t in result.trades)
+        out_sample_pnls.append(result.total_pnl)
+        windows.append(result)
+
+    aggregate_pnl = sum(w.total_pnl for w in windows)
+    total_wins = sum(w.win_count for w in windows)
+    total_losses = sum(w.loss_count for w in windows)
+    total_count = total_wins + total_losses
+
+    all_returns = []
+    for w in windows:
+        for t in w.trades:
+            if t.size_usd > 0:
+                all_returns.append(t.pnl / t.size_usd)
+
+    agg_sharpe = 0.0
+    if len(all_returns) >= 2:
+        mean_ret = sum(all_returns) / len(all_returns)
+        var = sum((r - mean_ret) ** 2 for r in all_returns) / (len(all_returns) - 1)
+        std_ret = math.sqrt(var) if var > 0 else 0.0
+        agg_sharpe = (mean_ret / std_ret * math.sqrt(252)) if std_ret > 0 else 0.0
+
+    # Detect overfitting: if first half of windows performed much better
+    is_overfit = False
+    if len(out_sample_pnls) >= 4:
+        mid = len(out_sample_pnls) // 2
+        early_avg = sum(out_sample_pnls[:mid]) / mid
+        late_avg = sum(out_sample_pnls[mid:]) / (len(out_sample_pnls) - mid)
+        if early_avg > 0 and late_avg < early_avg * 0.3:
+            is_overfit = True
+
+    return WalkForwardResult(
+        windows=windows,
+        aggregate_pnl=round(aggregate_pnl, 2),
+        aggregate_sharpe=round(agg_sharpe, 3),
+        aggregate_win_rate=round(total_wins / total_count, 4) if total_count > 0 else 0.0,
+        is_overfit=is_overfit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Report formatting
+# ---------------------------------------------------------------------------
+
+
+def format_portfolio_report(result: PortfolioBacktestResult) -> str:
+    """Format a portfolio backtest result."""
+    lines = [
+        "=" * 60,
+        "PORTFOLIO BACKTEST REPORT",
+        "=" * 60,
+        f"  Markets tested: {result.markets_tested}",
+        f"  Total trades: {result.total_trades}",
+        f"  Total PnL: ${result.total_pnl:.2f}",
+        f"  Win rate: {result.win_rate:.1%}",
+        f"  Portfolio Sharpe: {result.portfolio_sharpe:.2f}",
+        f"  Max drawdown: {result.max_drawdown:.1%}",
+        f"  Profit factor: {result.profit_factor:.2f}" if result.profit_factor != float("inf") else "  Profit factor: inf",
+        f"  Avg trade PnL: ${result.avg_trade_pnl:.4f}",
+        "",
+        "Per-market breakdown:",
+    ]
+    for r in result.per_market:
+        total = r.win_count + r.loss_count
+        if total == 0:
+            continue
+        wr = r.win_count / total * 100
+        lines.append(f"  {r.market_question[:50]:50s} | {total:3d} trades | ${r.total_pnl:8.2f} | WR={wr:.0f}%")
+    return "\n".join(lines)
+
+
+def format_walk_forward_report(result: WalkForwardResult) -> str:
+    """Format a walk-forward validation result."""
+    lines = [
+        "=" * 60,
+        "WALK-FORWARD VALIDATION",
+        "=" * 60,
+        f"  Windows: {len(result.windows)}",
+        f"  Aggregate PnL: ${result.aggregate_pnl:.2f}",
+        f"  Aggregate Sharpe: {result.aggregate_sharpe:.2f}",
+        f"  Aggregate win rate: {result.aggregate_win_rate:.1%}",
+        f"  Overfit detected: {'YES' if result.is_overfit else 'NO'}",
+        "",
+    ]
+    for i, w in enumerate(result.windows, 1):
+        total = w.win_count + w.loss_count
+        lines.append(f"  Window {i}: {total} trades, PnL=${w.total_pnl:.2f}, DD={w.max_drawdown:.1%}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+async def run_from_cli() -> None:
+    """Run a quick backtest on recently resolved markets."""
+    print("Fetching resolved markets from Polymarket...")
+    markets = await fetch_resolved_markets(limit=10, min_volume=20000.0)
+    if not markets:
+        print("No resolved markets found with sufficient volume.")
+        return
+
+    print(f"Found {len(markets)} markets. Running portfolio backtest...")
+    result = await run_portfolio_backtest(markets, starting_capital=1000.0)
+    print(format_portfolio_report(result))
+
+
+if __name__ == "__main__":
+    asyncio.run(run_from_cli())

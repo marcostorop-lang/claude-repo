@@ -239,7 +239,9 @@ class TestPromptABTesting:
     def test_default_variant_is_default(self):
         from bot.core.claude_oracle import PromptABTester
         tester = PromptABTester()
-        assert tester.variant_names == ["default"]
+        assert "structured_v1" in tester.variant_names
+        assert "aggressive_v2" in tester.variant_names
+        assert len(tester.variant_names) == 2
 
     def test_pick_variant_returns_valid(self):
         from bot.core.claude_oracle import PromptABTester, PromptVariant
