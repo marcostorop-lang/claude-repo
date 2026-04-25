@@ -28,7 +28,9 @@ import click
 from bot.config import cfg
 from bot.core import calibration
 from bot.core.claude_oracle import ClaudeOracle
-from bot.core.risk_manager import RiskManager
+from bot.core.error_monitor import monitor as error_monitor
+from bot.core.risk_manager import Position, RiskManager
+from bot.core.state_persistence import load_state, save_state
 from bot.core.utils import notify_discord, notify_telegram
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,33 @@ async def _run_bot() -> None:
     oracle = ClaudeOracle()
     risk = RiskManager()
 
+    # Restore state from previous run (graceful shutdown recovery)
+    saved = load_state()
+    if saved:
+        try:
+            from bot.core.utils import Side
+            for pos_dict in saved.get("positions", []):
+                pos = Position(
+                    token_id=pos_dict["token_id"],
+                    condition_id=pos_dict.get("condition_id", ""),
+                    side=Side(pos_dict["side"]),
+                    size=pos_dict["size"],
+                    entry_price=pos_dict["entry_price"],
+                    strategy=pos_dict.get("strategy", "unknown"),
+                    timestamp=pos_dict.get("timestamp", time.time()),
+                    category=pos_dict.get("category", ""),
+                )
+                risk.positions[pos.token_id] = pos
+            risk._current_equity = saved.get("equity", cfg.starting_capital_usd)
+            risk._peak_equity = saved.get("peak_equity", risk._current_equity)
+            risk._total_realized_pnl = saved.get("total_pnl", 0.0)
+            logger.info(
+                "Restored %d positions, equity=$%.2f from saved state.",
+                len(risk.positions), risk._current_equity,
+            )
+        except Exception:
+            logger.warning("Failed to restore positions from saved state.", exc_info=True)
+
     # Build competitive edge: news + data feeds
     news_fetcher = None
     data_router = None
@@ -231,8 +260,9 @@ async def _run_bot() -> None:
                             t.get("price", 0), t.get("size_usd", 0),
                             t.get("edge", 0), t.get("mode", "?"),
                         )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Strategy %s crashed — continuing.", strat.name)
+                error_monitor.record("strategy_crash", f"{strat.name}: {exc}", exc=exc)
 
         # Check position exits (stop-loss, take-profit, max hold)
         try:
@@ -240,8 +270,9 @@ async def _run_bot() -> None:
             exits = await risk.check_exits(get_book)
             for ex in exits:
                 _persist_trade(ex)
-        except Exception:
+        except Exception as exc:
             logger.exception("Position exit check failed.")
+            error_monitor.record("exit_check", str(exc), exc=exc)
 
         # Log risk state
         s = risk.summary()
@@ -269,6 +300,7 @@ async def _run_bot() -> None:
                     claude_daily_spend=budget["daily_spend_usd"],
                     claude_budget_limit=budget["budget_limit_usd"],
                     claude_calls=budget["total_calls"],
+                    errors=error_monitor.summary(),
                 )
             except Exception:
                 logger.debug("healthcheck update failed", exc_info=True)
@@ -311,8 +343,34 @@ async def _run_bot() -> None:
                 break
             await asyncio.sleep(1)
 
-    # Shutdown
-    logger.info("Shutting down…")
+    # Graceful shutdown: save state, cancel orders, notify
+    logger.info("Shutting down — saving state…")
+
+    # Save positions and equity for next startup
+    positions_data = [
+        {
+            "token_id": p.token_id,
+            "condition_id": p.condition_id,
+            "side": p.side.value,
+            "size": p.size,
+            "entry_price": p.entry_price,
+            "strategy": p.strategy,
+            "timestamp": p.timestamp,
+            "category": p.category,
+        }
+        for p in risk.positions.values()
+    ]
+    save_state(
+        positions=positions_data,
+        equity=risk._current_equity,
+        total_pnl=risk._total_realized_pnl,
+        daily_pnl=risk._daily_pnl,
+        cycle_count=cycle,
+        peak_equity=risk._peak_equity,
+        strategy_pnl=dict(risk._strategy_daily_pnl),
+        extra={"error_summary": error_monitor.summary()},
+    )
+
     if cfg.strategy_market_making:
         from bot.core.polymarket_client import cancel_all
         await cancel_all()
