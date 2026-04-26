@@ -91,6 +91,14 @@ class Config:
     min_volume: float = field(default_factory=lambda: _env_float("MIN_VOLUME", 1000))
     min_liquidity: float = field(default_factory=lambda: _env_float("MIN_LIQUIDITY", 500))
     max_spread: float = field(default_factory=lambda: _env_float("MAX_SPREAD", 0.15))
+    # When True (default), a BUY whose snapshot does not carry a positive
+    # spread is rejected.  Without this gate, ``MAX_SPREAD`` silently
+    # collapses to a no-op for any caller that forgets (or fails) to
+    # compute the spread — the exact "looks safe, isn't" failure mode.
+    # SELLs are never blocked: we always want to be able to close.
+    require_known_spread_for_buy: bool = field(
+        default_factory=lambda: _env_bool("REQUIRE_KNOWN_SPREAD_FOR_BUY", True)
+    )
     max_markets: int = field(default_factory=lambda: _env_int("MAX_MARKETS", 20))
 
     # -- Risk management -------------------------------------------------------
@@ -128,6 +136,21 @@ class Config:
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))
+
+    # -- Strategy net-edge gate (opt-in) ---------------------------------------
+    # Requires the *expected gross move* of a momentum/MR signal to clear
+    # half-spread + taker fee + ``strategy_min_net_edge`` before the
+    # strategy emits a BUY/SELL.  Without this, a 2% momentum gross-signal
+    # in a market with a 4% spread is a guaranteed loser.  The risk
+    # manager has its own ``MIN_EDGE_FOR_TRADE`` (used only by edge_based);
+    # this gate fixes the same hole for the simpler strategies.  Default
+    # off to preserve historical paper PnL byte-for-byte until enabled.
+    strategy_net_edge_gate_enabled: bool = field(
+        default_factory=lambda: _env_bool("STRATEGY_NET_EDGE_GATE_ENABLED", False)
+    )
+    strategy_min_net_edge: float = field(
+        default_factory=lambda: _env_float("STRATEGY_MIN_NET_EDGE", 0.005)
+    )
 
     # -- Dynamic sizing --------------------------------------------------------
     # Minimum confidence required to open a position (below this → skip)
@@ -387,6 +410,23 @@ class Config:
     )
     position_staleness_interval_minutes: float = field(
         default_factory=lambda: _env_float("POSITION_STALENESS_INTERVAL_MINUTES", 120.0)
+    )
+
+    # -- Zombie position detection (always on) ---------------------------------
+    # Distinct from POSITION_STALENESS_*, which looks for *days* of price
+    # stagnation in the historical feed.  This counter tracks *ticks*
+    # for which ``client.get_price`` returned ``None`` for a position,
+    # which indicates the API is silent for that token even though the
+    # bot itself is healthy.  Without this gate, SL/TP checks silently
+    # skip the position and capital stays trapped.  ``0`` disables.
+    zombie_position_max_missing_ticks: int = field(
+        default_factory=lambda: _env_int("ZOMBIE_POSITION_MAX_MISSING_TICKS", 5)
+    )
+    # ``alert`` (log + optional webhook) or ``close`` (force-close at
+    # last known price).  ``close`` is safer for capital preservation
+    # but requires a non-zero ``last_known_price`` to mark-to.
+    zombie_position_action: str = field(
+        default_factory=lambda: _env("ZOMBIE_POSITION_ACTION", "alert")
     )
 
     # -- Temporal edge filter (opt-in) -----------------------------------------

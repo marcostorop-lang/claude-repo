@@ -66,6 +66,7 @@ def _accrue_fill_fee(
     portfolio: PortfolioTracker,
     filled_size: float,
     fill_price: float,
+    is_maker: bool = False,
 ) -> None:
     """Record the execution fee for a fill, if the fee model is enabled.
 
@@ -78,7 +79,50 @@ def _accrue_fill_fee(
     # Always compute; helper returns 0 when bps==0.
     from src.analysis.fees import compute_fee_usd
     notional = filled_size * fill_price
-    portfolio.record_fee(compute_fee_usd(cfg, notional, is_maker=False))
+    portfolio.record_fee(compute_fee_usd(cfg, notional, is_maker=is_maker))
+
+
+def _observe_position_price(
+    portfolio: PortfolioTracker,
+    cfg: Config,
+    token_id: str,
+    current_price: float | None,
+) -> tuple[bool, float | None]:
+    """Update price-observation tracking and detect zombies.
+
+    Returns ``(is_zombie, fallback_price)``:
+      * ``is_zombie`` is True the first tick the missing-price counter
+        reaches the configured threshold (and on every tick after).
+      * ``fallback_price`` is the position's ``last_known_price`` when
+        the operator chose ``ZOMBIE_POSITION_ACTION=close`` and a
+        last-known price is available; ``None`` otherwise (alert-only).
+
+    Without this hook, a position whose price feed has gone silent
+    silently bypasses every SL/TP check on every tick — capital
+    trapped indefinitely.
+    """
+    if current_price is not None and current_price > 0:
+        portfolio.record_price_observation(token_id, current_price)
+        return (False, None)
+    threshold = int(getattr(cfg, "zombie_position_max_missing_ticks", 0) or 0)
+    misses = portfolio.record_missing_price(token_id)
+    if threshold <= 0 or misses < threshold:
+        return (False, None)
+    pos = portfolio.positions.get(token_id)
+    if pos is None:
+        return (False, None)
+    action = (getattr(cfg, "zombie_position_action", "alert") or "alert").lower()
+    if action == "close" and pos.last_known_price > 0:
+        logger.warning(
+            "ZOMBIE POSITION: %s missing price for %d ticks → force-closing at last known %.4f.",
+            token_id[:12], misses, pos.last_known_price,
+        )
+        return (True, pos.last_known_price)
+    logger.warning(
+        "ZOMBIE POSITION: %s missing price for %d consecutive ticks (action=%s).",
+        token_id[:12], misses, action,
+    )
+    return (True, None)
 
 
 # ---------------------------------------------------------------------------
@@ -625,7 +669,7 @@ def run_loop(cfg: Config) -> None:
 
         tick_count += 1
         # Export bot state for dashboard every tick
-        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client)
+        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client, store)
 
         logger.debug("Sleeping %d s …", cfg.poll_interval)
         for _ in range(cfg.poll_interval):
@@ -654,10 +698,19 @@ def _check_exits_only(
     tick_ts = iso_now()
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
-        if current_price is None:
-            continue
+        is_zombie, fallback_price = _observe_position_price(
+            portfolio, cfg, token_id, current_price,
+        )
         exit_reason = ""
-        if risk_mgr.check_stop_loss(pos.entry_price, current_price):
+        if current_price is None:
+            if is_zombie and fallback_price is not None:
+                current_price = fallback_price
+                exit_reason = "zombie_close"
+            else:
+                continue
+        if exit_reason:
+            pass  # already determined above (zombie close)
+        elif risk_mgr.check_stop_loss(pos.entry_price, current_price):
             exit_reason = "stop_loss"
         elif risk_mgr.check_take_profit(pos.entry_price, current_price):
             exit_reason = "take_profit"
@@ -730,12 +783,30 @@ def _export_bot_state(
     strategy: BaseStrategy,
     tick_count: int,
     client: PolymarketClient,
+    store: SQLiteStore | None = None,
 ) -> None:
-    """Write a JSON file with current bot state for the dashboard to consume."""
+    """Write a JSON file with current bot state for the dashboard to consume.
+
+    The dashboard treats this file as the single source of truth — it
+    never recomputes PnL or win-rate from raw trades.  All derived
+    metrics (realised, unrealised, fees, win rate, open losers count)
+    are computed here and exported as final numbers, so the dashboard
+    cannot diverge from the backend.
+
+    Written atomically via ``os.replace`` so a concurrent reader never
+    sees a half-written JSON document.
+    """
     try:
+        import os, tempfile
         positions_data = []
+        open_losers = 0
+        unrealised_total = 0.0
         for pos in portfolio.positions.values():
             current_price = client.get_price(pos.token_id)
+            unrealised = pos.unrealised_pnl(current_price) if current_price else 0.0
+            unrealised_total += unrealised
+            if current_price is not None and unrealised < 0:
+                open_losers += 1
             positions_data.append({
                 "token_id": pos.token_id[:16],
                 "condition_id": pos.condition_id[:16],
@@ -743,12 +814,25 @@ def _export_bot_state(
                 "size": round(pos.size, 4),
                 "entry_price": round(pos.entry_price, 4),
                 "current_price": round(current_price, 4) if current_price else None,
-                "unrealised_pnl": round(pos.unrealised_pnl(current_price), 4) if current_price else None,
+                "unrealised_pnl": round(unrealised, 4) if current_price else None,
                 "strategy": pos.strategy,
             })
 
+        # Honest win-rate from closed trades only.  An empty store gives
+        # an all-zero block — no inflated 100% from a handful of paper
+        # trades and definitely no synthetic balance.
+        win_stats = store.compute_win_rate() if store is not None else {
+            "wins": 0, "losses": 0, "breakeven": 0,
+            "total_closed": 0, "win_rate": 0.0,
+        }
+
+        realised = portfolio.realised_pnl
+        fees = portfolio.fees_paid
+        net_pnl_after_fees = realised + unrealised_total - fees
+
         state = {
             "timestamp": iso_now(),
+            "heartbeat_unix": int(time.time()),
             "tick_count": tick_count,
             "mode": "paper" if cfg.is_paper else "live",
             "strategy": strategy.name,
@@ -756,9 +840,15 @@ def _export_bot_state(
             "daily_pnl": round(risk_mgr.daily_pnl, 4),
             "portfolio": {
                 "open_positions": portfolio.open_position_count(),
+                "open_losers": open_losers,
                 "total_exposure": round(portfolio.total_exposure(), 2),
-                "realised_pnl": round(portfolio.realised_pnl, 4),
+                "realised_pnl": round(realised, 4),
+                "unrealised_pnl": round(unrealised_total, 4),
+                "fees_paid": round(fees, 4),
+                "net_pnl": round(realised + unrealised_total, 4),
+                "net_pnl_after_fees": round(net_pnl_after_fees, 4),
             },
+            "win_rate": win_stats,
             "config": {
                 "max_position_size": cfg.max_position_size,
                 "max_total_exposure": cfg.max_total_exposure,
@@ -773,8 +863,19 @@ def _export_bot_state(
             },
             "positions": positions_data,
         }
-        with open("bot_state.json", "w") as f:
+        # Atomic write: write to a sibling temp file in the same dir,
+        # then ``os.replace`` (atomic on POSIX) so a concurrent reader
+        # either sees the previous full file or the new full file —
+        # never a half-written one.
+        target = "bot_state.json"
+        tmp_dir = os.path.dirname(os.path.abspath(target)) or "."
+        with tempfile.NamedTemporaryFile(
+            "w", dir=tmp_dir, prefix=".bot_state.", suffix=".json.tmp",
+            delete=False,
+        ) as f:
             json.dump(state, f, indent=2)
+            tmp_path = f.name
+        os.replace(tmp_path, target)
     except Exception:
         logger.debug("Failed to export bot state JSON.", exc_info=True)
 
@@ -802,8 +903,18 @@ def _tick(
     tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
+        is_zombie, fallback_price = _observe_position_price(
+            portfolio, cfg, token_id, current_price,
+        )
         if current_price is None:
-            logger.debug("No price for position %s — skipping SL/TP check.", token_id[:12])
+            if is_zombie and fallback_price is not None:
+                logger.warning(
+                    "Force-closing zombie position %s at last known %.4f.",
+                    token_id[:12], fallback_price,
+                )
+                tokens_to_close.append((token_id, "zombie_close"))
+            else:
+                logger.debug("No price for position %s — skipping SL/TP check.", token_id[:12])
             continue
         if risk_mgr.check_stop_loss(pos.entry_price, current_price):
             logger.info("Stop-loss triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
@@ -847,7 +958,15 @@ def _tick(
         if pos is None:
             continue
         close_side = "SELL" if pos.side == "BUY" else "BUY"
-        current_price = client.get_price(token_id) or pos.entry_price
+        # Prefer live price → last-known mark → entry price (worst proxy).
+        # On a zombie close the live API is mute, so the last-known
+        # observation is the most honest mark we have; falling back to
+        # entry_price would silently zero out realised PnL.
+        current_price = (
+            client.get_price(token_id)
+            or (pos.last_known_price if pos.last_known_price > 0 else None)
+            or pos.entry_price
+        )
         current_spread = client.get_spread(token_id) or 0.0
         order = OrderRequest(
             token_id=token_id,
@@ -1357,7 +1476,10 @@ def _tick(
             # Use actual filled size (may be partial if book depth < requested)
             actual_size = result.filled_size if result.filled_size > 0 else verdict.adjusted_size
             actual_fill = result.fill_price if result.fill_price > 0 else exec_price
-            _accrue_fill_fee(cfg, portfolio, actual_size, actual_fill)
+            _accrue_fill_fee(
+                cfg, portfolio, actual_size, actual_fill,
+                is_maker=(order_type == "maker"),
+            )
             portfolio.open_position(
                 Position(
                     token_id=snap.token_id,

@@ -328,6 +328,41 @@ class SQLiteStore:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def compute_win_rate(self) -> dict:
+        """Aggregate realised win/loss stats from the calibration table.
+
+        Counts only *closed* trades, so the figure is honest about the
+        fact that an open losing position is not yet a "loss".  The
+        complementary unrealised picture lives in PortfolioTracker.
+
+        ``breakeven`` (PnL == 0) is reported separately so a noisy run
+        full of zero-PnL paper exits can't artificially inflate the
+        win rate.  ``win_rate`` is wins / (wins + losses) — breakevens
+        are excluded from the denominator on purpose.
+        """
+        cur = self._conn.execute(
+            "SELECT pnl FROM calibration WHERE exit_timestamp IS NOT NULL"
+        )
+        wins = losses = breakeven = 0
+        for (pnl,) in cur.fetchall():
+            if pnl is None:
+                continue
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+            else:
+                breakeven += 1
+        decisive = wins + losses
+        win_rate = (wins / decisive) if decisive > 0 else 0.0
+        return {
+            "wins": wins,
+            "losses": losses,
+            "breakeven": breakeven,
+            "total_closed": wins + losses + breakeven,
+            "win_rate": round(win_rate, 4),
+        }
+
     # -- Tick stats ------------------------------------------------------------
 
     # -- Arbitrage opportunities (read-only observer) --------------------------

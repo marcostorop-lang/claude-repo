@@ -85,6 +85,9 @@ class BacktestReport:
     max_drawdown_pct: float
     win_rate: float
     total_pnl: float
+    rejections_simulated: int = 0
+    partial_fills: int = 0
+    seed: int | None = None
     trades: list[BacktestTrade] = field(default_factory=list)
 
     def summary(self) -> str:

@@ -24,6 +24,12 @@ class Position:
     order_id: str
     entry_timestamp: str = ""
     category: str = ""
+    # Last successful price observation.  Used to detect "zombie"
+    # positions whose price feed has gone silent — without this the
+    # SL/TP checks would simply skip the position indefinitely.
+    last_known_price: float = 0.0
+    last_price_ts: str = ""
+    consecutive_missing_price_ticks: int = 0
 
     def unrealised_pnl(self, current_price: float) -> float:
         if self.side == "BUY":
@@ -366,6 +372,50 @@ class PortfolioTracker:
             "realised_pnl_today": realised_today,
             "open_positions": len(self.positions),
         }
+
+    def record_price_observation(self, token_id: str, price: float) -> None:
+        """Record a successful price observation for a position.
+
+        Resets the missing-tick counter so an intermittent API hiccup
+        doesn't accumulate towards the zombie threshold.  No-op when
+        the token has no open position or when ``price`` is non-positive.
+        """
+        if price <= 0:
+            return
+        pos = self.positions.get(token_id)
+        if pos is None:
+            return
+        from datetime import datetime, timezone
+        pos.last_known_price = float(price)
+        pos.last_price_ts = datetime.now(timezone.utc).isoformat()
+        pos.consecutive_missing_price_ticks = 0
+
+    def record_missing_price(self, token_id: str) -> int:
+        """Increment the consecutive-missing-price counter for a position.
+
+        Returns the new counter value (0 when the position is unknown,
+        so callers can treat "no position" the same as "no problem").
+        """
+        pos = self.positions.get(token_id)
+        if pos is None:
+            return 0
+        pos.consecutive_missing_price_ticks += 1
+        return pos.consecutive_missing_price_ticks
+
+    def zombie_positions(self, max_missing_ticks: int) -> list[Position]:
+        """Return positions whose price feed has been silent too long.
+
+        A position is "zombie" once its consecutive-missing-price count
+        meets or exceeds ``max_missing_ticks``.  Threshold ``<= 0``
+        disables the check (returns empty list) so the feature can be
+        shipped opt-in via configuration.
+        """
+        if max_missing_ticks <= 0:
+            return []
+        return [
+            p for p in self.positions.values()
+            if p.consecutive_missing_price_ticks >= max_missing_ticks
+        ]
 
     def record_fee(self, fee_usd: float) -> None:
         """Add to the cumulative fees-paid counter.

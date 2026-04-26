@@ -79,12 +79,43 @@ for (const b of buys) {
   } else { openPos.add(b.token_id); }
 }
 const mktsCount = queryOne("SELECT COUNT(DISTINCT condition_id) as cnt FROM markets_cache");
+
+// Prefer the backend's authoritative numbers from bot_state.json (which
+// includes fees, unrealised PnL, and an honest closed-trades win rate).
+// Fall back to the JS-derived reconstruction only for legacy DBs that
+// haven't run a tick under the new exporter yet.
+const stateP = botState && botState.portfolio;
+const stateW = botState && botState.win_rate;
 const o = {
-  total_trades: total.cnt, winning: wins, losing: losses,
-  total_pnl: +totalPnl.toFixed(2), balance: +(1000 + totalPnl).toFixed(2),
-  markets: mktsCount.cnt, open_pos: openPos.size,
-  win_rate: (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) : "0",
+  total_trades: total.cnt,
+  winning: stateW ? stateW.wins : wins,
+  losing: stateW ? stateW.losses : losses,
+  total_pnl: stateP ? +stateP.net_pnl_after_fees.toFixed(2) : +totalPnl.toFixed(2),
+  realised_pnl: stateP ? +stateP.realised_pnl.toFixed(2) : +totalPnl.toFixed(2),
+  unrealised_pnl: stateP ? +stateP.unrealised_pnl.toFixed(2) : 0,
+  fees_paid: stateP ? +stateP.fees_paid.toFixed(2) : 0,
+  open_losers: stateP ? stateP.open_losers : 0,
+  // No more synthetic 1000-USD starting balance.  Show net PnL only —
+  // the dashboard never invents capital that the bot doesn't have.
+  markets: mktsCount.cnt,
+  open_pos: stateP ? stateP.open_positions : openPos.size,
+  win_rate: stateW
+    ? (stateW.total_closed > 0 ? (stateW.win_rate * 100).toFixed(1) : "0")
+    : ((wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(1) : "0"),
+  win_rate_n: stateW ? stateW.total_closed : (wins + losses),
 };
+
+// Heartbeat freshness: a tick that's older than 2x the configured poll
+// interval likely means the bot is dead/stuck — never paint the status
+// dot green when it isn't.
+let botFresh = false;
+let staleSeconds = null;
+if (botState && typeof botState.heartbeat_unix === "number") {
+  const ageS = Math.floor(Date.now() / 1000) - botState.heartbeat_unix;
+  staleSeconds = ageS;
+  const poll = (botState.config && botState.config.poll_interval) || 60;
+  botFresh = ageS <= 2 * poll;
+}
 
 // === PERFORMANCE ===
 const allTrades = query("SELECT * FROM trades ORDER BY timestamp ASC");
@@ -472,25 +503,25 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
 <div class="main">
 <div class="header">
   <span style="font-size:14px;color:#9ca3af">PolyBot Dashboard</span>
-  <div class="status"><div class="dot"></div> ${botState ? botState.mode.toUpperCase() + ' Mode' : 'Paper Trading Mode'}${botState && botState.circuit_breaker_active ? ' | <span style="color:#ef4444">CIRCUIT BREAKER</span>' : ''}</div>
+  <div class="status"><div class="dot" style="background:${botFresh ? '#22c55e' : '#ef4444'}"></div> ${botState ? botState.mode.toUpperCase() + ' Mode' : 'Paper Trading Mode'}${botFresh ? '' : (botState ? ` | <span style="color:#ef4444">STALE (${staleSeconds}s)</span>` : ' | <span style="color:#ef4444">NO HEARTBEAT</span>')}${botState && botState.circuit_breaker_active ? ' | <span style="color:#ef4444">CIRCUIT BREAKER</span>' : ''}</div>
 </div>
 <div class="content">
 
 <div class="section" id="overview">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-    <div class="dot"></div>
-    <h2 style="margin:0">Bot Active</h2>
+    <div class="dot" style="background:${botFresh ? '#22c55e' : '#ef4444'}"></div>
+    <h2 style="margin:0">${botFresh ? 'Bot Active' : (botState ? `Bot Stale (${staleSeconds}s since last tick)` : 'Bot Offline (no state)')}</h2>
   </div>
   <div class="grid4">
-    <div class="card"><div class="stat-val" style="color:${pnlColor}">${pnlSign}$${o.total_pnl.toFixed(2)}</div><div class="stat-label">Total PnL</div></div>
-    <div class="card"><div class="stat-val white">$${o.balance.toFixed(2)}</div><div class="stat-label">Simulated Balance</div></div>
-    <div class="card"><div class="stat-val white">${o.total_trades}</div><div class="stat-label">Total Trades</div></div>
-    <div class="card"><div class="stat-val white">${o.win_rate}%</div><div class="stat-label">Win Rate</div></div>
+    <div class="card"><div class="stat-val" style="color:${pnlColor}">${pnlSign}$${o.total_pnl.toFixed(2)}</div><div class="stat-label">Net PnL (after fees)</div></div>
+    <div class="card"><div class="stat-val white">$${o.realised_pnl.toFixed(2)}</div><div class="stat-label">Realised PnL</div></div>
+    <div class="card"><div class="stat-val ${o.unrealised_pnl >= 0 ? 'green' : 'red'}">$${o.unrealised_pnl.toFixed(2)}</div><div class="stat-label">Unrealised PnL</div></div>
+    <div class="card"><div class="stat-val white">${o.win_rate}%${o.win_rate_n ? ` <span style="font-size:11px;color:#9ca3af">(n=${o.win_rate_n})</span>` : ''}</div><div class="stat-label">Win Rate (closed)</div></div>
   </div>
   <div class="grid4">
     <div class="card"><div class="stat-val green">${o.winning}</div><div class="stat-label">Winning Trades</div></div>
     <div class="card"><div class="stat-val red">${o.losing}</div><div class="stat-label">Losing Trades</div></div>
-    <div class="card"><div class="stat-val white">${o.markets}</div><div class="stat-label">Markets</div></div>
+    <div class="card"><div class="stat-val ${o.open_losers > 0 ? 'red' : 'white'}">${o.open_losers}</div><div class="stat-label">Open Losers</div></div>
     <div class="card"><div class="stat-val white">${o.open_pos}</div><div class="stat-label">Open Positions</div></div>
   </div>
 </div>

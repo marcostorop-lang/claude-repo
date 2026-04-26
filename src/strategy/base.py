@@ -50,3 +50,29 @@ class BaseStrategy(ABC):
     ) -> Signal:
         """Evaluate a market and return a trading signal."""
         ...
+
+
+def compute_net_edge(
+    gross_edge: float,
+    spread: float,
+    taker_fee_bps: float,
+) -> dict:
+    """Decompose a strategy's expected gross move into a net-of-cost edge.
+
+    Returns a dict with the components for inclusion in
+    ``Signal.features`` so the audit trail records the exact PnL math
+    the strategy assumed when it decided to trade.
+
+    ``half_spread`` is the per-leg cost when crossing on entry; we
+    deliberately do *not* double for exit because round-trip costs
+    are accrued by the executor on each leg separately.
+    """
+    half_spread = max(0.0, float(spread)) / 2.0
+    fee_pct = max(0.0, float(taker_fee_bps)) / 10000.0
+    net = float(gross_edge) - half_spread - fee_pct
+    return {
+        "gross_edge": float(gross_edge),
+        "half_spread": half_spread,
+        "fee_pct": fee_pct,
+        "net_edge": net,
+    }

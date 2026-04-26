@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 
 from src.config import Config
 from src.portfolio.tracker import PortfolioTracker
@@ -32,9 +32,11 @@ class RiskManager:
     def __init__(self, cfg: Config, portfolio: PortfolioTracker) -> None:
         self.cfg = cfg
         self.portfolio = portfolio
-        # Daily loss tracking
+        # Daily loss tracking — anchored to UTC so the reset boundary is
+        # the same regardless of where the host runs.  ``date.today()``
+        # would silently drift the cutoff by the local timezone offset.
         self._daily_realized_pnl: float = 0.0
-        self._current_date: date = date.today()
+        self._current_date: date = datetime.now(timezone.utc).date()
         self._circuit_breaker_tripped: bool = False
         # Optional temporal-edge filter (see ``src/analysis/temporal_edge.py``).
         # Left ``None`` by default; the main loop constructs one and attaches
@@ -118,8 +120,8 @@ class RiskManager:
             )
 
     def _maybe_reset_daily(self) -> None:
-        """Reset daily counters if the date has changed."""
-        today = date.today()
+        """Reset daily counters at UTC midnight."""
+        today = datetime.now(timezone.utc).date()
         if today != self._current_date:
             if self._circuit_breaker_tripped:
                 logger.info("Circuit breaker reset for new day.")
@@ -416,8 +418,23 @@ class RiskManager:
                     pass
 
         # --- Spread check ---
+        # Two-part gate:
+        #   1. If a positive spread is supplied, enforce ``MAX_SPREAD``.
+        #   2. If the spread is unknown (<= 0) on a BUY and the operator
+        #      hasn't explicitly opted out, refuse the trade.  Without
+        #      this fallback, any caller that forgets to compute spread
+        #      silently bypasses the cap — the "looks safe, isn't" hole.
         if spread > 0 and spread > self.cfg.max_spread:
             return RiskVerdict(False, 0.0, f"Spread {spread:.4f} exceeds max {self.cfg.max_spread:.4f}.")
+        if (
+            signal.action == Action.BUY
+            and spread <= 0
+            and getattr(self.cfg, "require_known_spread_for_buy", True)
+        ):
+            return RiskVerdict(
+                False, 0.0,
+                "Spread unknown — refusing BUY (set REQUIRE_KNOWN_SPREAD_FOR_BUY=false to override).",
+            )
 
         # --- Price boundary filter ---
         if signal.action == Action.BUY and price > 0:
