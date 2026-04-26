@@ -1766,6 +1766,101 @@ def cmd_backtest(strategy: str, min_points: int, spread: float, output: str):
     store.close()
 
 
+@cli.command("validate-strategy")
+@click.option("--strategy", default=None, help="Strategy to validate (defaults to config).")
+@click.option("--min-points", default=20, help="Minimum price points per token.")
+@click.option("--spread", default=0.02, help="Assumed spread for slippage.")
+@click.option("--train-size", default=None, type=int, help="Train window size (ticks). Default: cfg.validation_train_size.")
+@click.option("--test-size", default=None, type=int, help="Test (OOS) window size. Default: cfg.validation_test_size.")
+@click.option("--purge", default=None, type=int, help="Ticks to drop at the train/test boundary.")
+@click.option("--embargo", default=None, type=int, help="Ticks to skip at the start of each test slice.")
+@click.option("--n-trials", default=None, type=int, help="Number of strategy configurations evaluated to arrive here. Drives DSR.")
+@click.option("--seed", default=None, type=int, help="RNG seed for the inner backtester. Same seed → byte-identical report.")
+@click.option("--stress-slippage/--no-stress-slippage", default=False, help="Multiply assumed spread by VALIDATION_SLIPPAGE_STRESS_MULTIPLIER as a sanity check.")
+@click.option("--output", default="validation_report.json", help="Output JSON path.")
+def cmd_validate_strategy(
+    strategy: str,
+    min_points: int,
+    spread: float,
+    train_size: int | None,
+    test_size: int | None,
+    purge: int | None,
+    embargo: int | None,
+    n_trials: int | None,
+    seed: int | None,
+    stress_slippage: bool,
+    output: str,
+):
+    """Walk-forward validation against the promote-to-live gates.
+
+    Runs an anchored walk-forward over per-token price histories from
+    SQLite, evaluates the configured ``VALIDATION_*`` thresholds, and
+    prints a binary verdict (``PROMOTE`` / ``REJECT``) plus the gates
+    that passed or failed.  Writes the full machine-readable report
+    to ``--output``.
+
+    This command is read-only: it never places orders, never mutates
+    portfolio state, and never trains anything destructively.  Run it
+    on the same DB the bot writes to.
+    """
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    if strategy:
+        os.environ["STRATEGY"] = strategy
+        cfg = Config()
+
+    store = SQLiteStore(cfg.sqlite_db_path)
+    strat = _build_strategy(cfg, store=store)
+
+    histories = load_price_histories_from_store(store, min_points=min_points)
+    if not histories:
+        click.echo(
+            f"No price histories with >= {min_points} points. "
+            f"Let the bot run first to collect prices.",
+        )
+        store.close()
+        return
+
+    used_spread = spread * cfg.validation_slippage_stress_multiplier if stress_slippage else spread
+    train = train_size if train_size is not None else cfg.validation_train_size
+    test = test_size if test_size is not None else cfg.validation_test_size
+    purge_v = purge if purge is not None else cfg.validation_purge
+    embargo_v = embargo if embargo is not None else cfg.validation_embargo
+    seed_v = seed if seed is not None else cfg.validation_seed
+    if n_trials is not None:
+        os.environ["VALIDATION_N_TRIALS"] = str(n_trials)
+        cfg = Config()
+
+    from src.backtest.walk_forward import run_walk_forward
+    from src.backtest.validate import evaluate_validation, report_to_json
+
+    click.echo(
+        f"Running walk-forward: tokens={len(histories)} "
+        f"train={train} test={test} purge={purge_v} embargo={embargo_v} "
+        f"seed={seed_v} spread={used_spread:.4f}{' (stress)' if stress_slippage else ''}",
+    )
+    wf = run_walk_forward(
+        cfg, strat, histories,
+        train_size=train, test_size=test,
+        purge=purge_v, embargo=embargo_v,
+        assumed_spread=used_spread,
+        seed=seed_v,
+    )
+    report = evaluate_validation(
+        strategy_name=strat.name, walk_forward=wf, cfg=cfg,
+    )
+    click.echo("")
+    click.echo(report.pretty())
+    with open(output, "w") as f:
+        f.write(report_to_json(report))
+    click.echo(f"\nFull report written to {output}")
+    if not report.promote:
+        # Non-zero exit so CI / shell pipelines can react to a REJECT.
+        store.close()
+        raise SystemExit(1)
+    store.close()
+
+
 @cli.command("calibration-report")
 @click.option("--bins", default=5, help="Number of confidence bins.")
 def cmd_calibration(bins: int):

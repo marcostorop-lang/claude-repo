@@ -680,6 +680,55 @@ class Config:
         default_factory=lambda: _env_int("LATENCY_WINDOW_SAMPLES", 500)
     )
 
+    # -- Strategy validation thresholds (CLI ``validate-strategy``) ----------
+    # The promote-to-live veredict requires *all* of the conditions
+    # below to hold simultaneously.  Defaults are conservative (López
+    # de Prado-style): the rule of thumb is that a strategy that can't
+    # clear these on paper data is never safe with live capital.
+    # Override via env to tighten or loosen for a given research phase.
+    validation_min_trades: int = field(
+        default_factory=lambda: _env_int("VALIDATION_MIN_TRADES", 200)
+    )
+    validation_min_oos_winning_windows_frac: float = field(
+        default_factory=lambda: _env_float("VALIDATION_MIN_OOS_WINNING_WINDOWS_FRAC", 0.6)
+    )
+    validation_min_median_oos_sharpe: float = field(
+        default_factory=lambda: _env_float("VALIDATION_MIN_MEDIAN_OOS_SHARPE", 0.5)
+    )
+    validation_min_psr: float = field(
+        default_factory=lambda: _env_float("VALIDATION_MIN_PSR", 0.95)
+    )
+    validation_min_dsr: float = field(
+        default_factory=lambda: _env_float("VALIDATION_MIN_DSR", 0.95)
+    )
+    validation_max_drawdown_pct: float = field(
+        default_factory=lambda: _env_float("VALIDATION_MAX_DRAWDOWN_PCT", 0.15)
+    )
+    validation_n_trials: int = field(
+        default_factory=lambda: _env_int("VALIDATION_N_TRIALS", 1)
+    )
+    validation_train_size: int = field(
+        default_factory=lambda: _env_int("VALIDATION_TRAIN_SIZE", 200)
+    )
+    validation_test_size: int = field(
+        default_factory=lambda: _env_int("VALIDATION_TEST_SIZE", 100)
+    )
+    validation_purge: int = field(
+        default_factory=lambda: _env_int("VALIDATION_PURGE", 5)
+    )
+    validation_embargo: int = field(
+        default_factory=lambda: _env_int("VALIDATION_EMBARGO", 2)
+    )
+    validation_seed: int = field(
+        default_factory=lambda: _env_int("VALIDATION_SEED", 0)
+    )
+    validation_periods_per_year: int = field(
+        default_factory=lambda: _env_int("VALIDATION_PERIODS_PER_YEAR", 252)
+    )
+    validation_slippage_stress_multiplier: float = field(
+        default_factory=lambda: _env_float("VALIDATION_SLIPPAGE_STRESS_MULTIPLIER", 2.0)
+    )
+
     # -- Metrics (opt-in JSONL sink) -------------------------------------------
     # Empty string disables.  When set, each tick writes one JSON record
     # to the file; external log shippers can tail it without opening the
