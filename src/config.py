@@ -170,6 +170,15 @@ class Config:
     # most a quarter of visible depth to leave headroom for slippage and
     # for the book to fill back in before a second tick fires.
     max_book_depth_fraction: float = field(default_factory=lambda: _env_float("MAX_BOOK_DEPTH_FRACTION", 0.0))
+    # Maximum tolerated slippage when walking the book at the requested
+    # size: ``slippage_pct`` is (fill_vwap / best_bid_or_ask - 1).  Above
+    # this the bot rejects the order rather than buy the wick.  Default
+    # 2% mirrors the long-standing hardcoded value that used to live in
+    # ``main._tick``; lifting it to config makes it tunable without
+    # editing source.
+    max_book_slippage_pct: float = field(
+        default_factory=lambda: _env_float("MAX_BOOK_SLIPPAGE_PCT", 0.02)
+    )
     # Edge-aware (fractional-Kelly) sizing: when True and a signed edge is
     # supplied by the strategy, scale the position by |edge| * confidence *
     # kelly_fraction.  This makes high-edge + high-confidence trades larger
@@ -204,6 +213,13 @@ class Config:
     # in the opposite direction to trigger exit.
     exit_on_edge_flip: bool = field(default_factory=lambda: _env_bool("EXIT_ON_EDGE_FLIP", False))
     exit_edge_flip_threshold: float = field(default_factory=lambda: _env_float("EXIT_EDGE_FLIP_THRESHOLD", 0.04))
+    # Confidence floor on the *re-estimated* edge before an edge-flip
+    # exit fires.  Without this gate, a low-confidence flicker against
+    # us would close the position prematurely.  Lifted out of two
+    # hardcoded ``> 0.3`` checks in main._tick / _check_exits_only.
+    exit_edge_flip_min_confidence: float = field(
+        default_factory=lambda: _env_float("EXIT_EDGE_FLIP_MIN_CONFIDENCE", 0.3)
+    )
 
     # Max relative divergence between the snapshot price (from the /price
     # endpoint, which can lag after low-activity periods) and the live book
@@ -346,6 +362,20 @@ class Config:
     )
     db_backup_keep: int = field(
         default_factory=lambda: _env_int("DB_BACKUP_KEEP", 7)
+    )
+
+    # -- Decision log retention ------------------------------------------------
+    # The bot writes a row per evaluated market per tick into
+    # ``decision_log``.  At realistic poll/market counts that crosses
+    # millions of rows in months, and the dashboard's ``GROUP BY action``
+    # queries slow to a crawl.  Periodic pruning bounds the working
+    # set without sacrificing the recent forensic window.
+    # ``0`` disables pruning entirely.
+    decision_log_retention_days: int = field(
+        default_factory=lambda: _env_int("DECISION_LOG_RETENTION_DAYS", 30)
+    )
+    decision_log_prune_interval_hours: float = field(
+        default_factory=lambda: _env_float("DECISION_LOG_PRUNE_INTERVAL_HOURS", 24.0)
     )
 
     # -- Storage ---------------------------------------------------------------

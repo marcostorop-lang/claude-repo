@@ -18,8 +18,25 @@ class SQLiteStore:
         self.db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
+        # Performance + concurrency PRAGMAs.  WAL lets the dashboard's
+        # read-only queries proceed while the bot writes a tick batch
+        # without blocking either side.  ``synchronous=NORMAL`` is the
+        # WAL-recommended pairing — durable across crashes, only at
+        # risk of losing the very last commit on hardware power loss
+        # (acceptable for paper, and we take periodic backups anyway).
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA foreign_keys=ON")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+        except sqlite3.DatabaseError:
+            # Older SQLite or unusual filesystem (e.g. some networked
+            # mounts) may refuse WAL.  Fall back silently rather than
+            # refusing to start the bot.
+            logger.exception("Could not apply performance PRAGMAs — continuing on defaults.")
         self._create_tables()
         self._migrate()
+        self._create_indexes()
 
     def _create_tables(self) -> None:
         cur = self._conn.cursor()
@@ -178,6 +195,67 @@ class SQLiteStore:
             )
         """)
         self._conn.commit()
+
+    def _create_indexes(self) -> None:
+        """Create the indexes the dashboard and reconstruction paths need.
+
+        ``CREATE INDEX IF NOT EXISTS`` is idempotent so this runs cheaply
+        on every startup.  Without these, the dashboard's GROUP BYs over
+        ``trades`` and the per-token price-history pulls became O(n)
+        scans the moment the DB grew past a few thousand rows.
+        """
+        cur = self._conn.cursor()
+        statements = [
+            "CREATE INDEX IF NOT EXISTS idx_trades_token        ON trades(token_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_condition    ON trades(condition_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_ts           ON trades(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_decision_ts         ON decision_log(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_decision_action     ON decision_log(action)",
+            "CREATE INDEX IF NOT EXISTS idx_decision_token      ON decision_log(token_id)",
+            "CREATE INDEX IF NOT EXISTS idx_price_token_ts      ON price_history(token_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_tick_ts             ON tick_stats(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_calibration_token   ON calibration(token_id)",
+            "CREATE INDEX IF NOT EXISTS idx_calibration_exit_ts ON calibration(exit_timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_resolutions_cond    ON market_resolutions(condition_id)",
+            "CREATE INDEX IF NOT EXISTS idx_semantic_token_ts   ON semantic_signals(token_id, timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_arb_ts              ON arb_opportunities(timestamp)",
+        ]
+        for stmt in statements:
+            try:
+                cur.execute(stmt)
+            except sqlite3.DatabaseError:
+                logger.exception("Failed to create index: %s", stmt)
+        self._conn.commit()
+
+    def prune_decision_log(self, max_age_days: int) -> int:
+        """Delete decision_log rows older than ``max_age_days``.
+
+        Returns the number of rows removed.  The decision log is the
+        biggest source of bloat in a long-running paper deployment —
+        the bot writes one row per signal and per risk rejection on
+        every market on every tick.  At 60s polls and 50 markets, that
+        easily clears 70k rows/day; without rotation the table can
+        cross 10M rows in a few months and queries against it grind to
+        a halt.
+
+        ``max_age_days <= 0`` disables pruning (returns 0).
+        """
+        if max_age_days <= 0:
+            return 0
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM decision_log WHERE timestamp < ?",
+            (cutoff,),
+        )
+        deleted = cur.rowcount or 0
+        self._conn.commit()
+        if deleted > 0:
+            logger.info(
+                "Pruned %d decision_log rows older than %d day(s).",
+                deleted, max_age_days,
+            )
+        return deleted
 
     def _migrate(self) -> None:
         """Add columns to existing tables if missing (backwards-compatible)."""

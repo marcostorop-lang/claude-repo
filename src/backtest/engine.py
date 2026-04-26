@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
@@ -114,7 +115,14 @@ class BacktestReport:
 
 
 class Backtester:
-    """Replay price histories through a strategy."""
+    """Replay price histories through a strategy.
+
+    Stochastic effects (partial fills, order rejections) are driven by a
+    local ``random.Random`` seeded from the constructor's ``seed``
+    argument so two runs with the same inputs produce byte-identical
+    reports.  When ``seed is None`` the engine uses an unseeded RNG —
+    only safe for exploratory runs whose output you do not commit.
+    """
 
     def __init__(
         self,
@@ -122,11 +130,23 @@ class Backtester:
         strategy: BaseStrategy,
         assumed_spread: float = 0.02,
         position_size_usd: float | None = None,
+        *,
+        seed: int | None = None,
+        rejection_prob: float = 0.0,
+        partial_fill_prob: float = 0.0,
+        partial_fill_min_ratio: float = 0.3,
     ) -> None:
         self.cfg = cfg
         self.strategy = strategy
         self.assumed_spread = assumed_spread
         self.position_size_usd = position_size_usd or cfg.max_position_size
+        # Determinism knobs.  ``seed=None`` keeps historical behaviour
+        # (no stochastic events fired since both probs default to 0).
+        self.seed = seed
+        self.rejection_prob = max(0.0, min(1.0, float(rejection_prob)))
+        self.partial_fill_prob = max(0.0, min(1.0, float(partial_fill_prob)))
+        self.partial_fill_min_ratio = max(0.0, min(1.0, float(partial_fill_min_ratio)))
+        self._rng = random.Random(seed)
 
     def run(self, price_histories: dict[str, list]) -> BacktestReport:
         """Replay every token's history independently.
@@ -141,6 +161,8 @@ class Backtester:
         """
         all_trades: list[BacktestTrade] = []
         signals_generated = 0
+        rejections_simulated = 0
+        partial_fills = 0
         total_ticks = 0
 
         for token_id, raw_history in price_histories.items():
@@ -207,6 +229,19 @@ class Backtester:
 
                 signals_generated += 1
 
+                # --- Order rejection (book full / spread widened / etc.) ---
+                # Probabilistic skip that mirrors the live failure mode of a
+                # passive maker quote not getting filled or a taker order
+                # bouncing off a thinning book.  Disabled by default
+                # (rejection_prob=0); enable with a non-zero prob to stress
+                # PnL against a more conservative execution model.
+                if (
+                    self.rejection_prob > 0
+                    and self._rng.random() < self.rejection_prob
+                ):
+                    rejections_simulated += 1
+                    continue
+
                 # --- Simulate fill (with slippage) ---
                 fill_price = current_price + half_spread
                 # Dynamic sizing: scale by confidence when enabled
@@ -214,6 +249,22 @@ class Backtester:
                 if self.cfg.sizing_confidence_scale and sig.confidence > 0:
                     base_usd *= min(sig.confidence, 1.0)
                 size = base_usd / fill_price if fill_price > 0 else 0.0
+
+                # --- Partial fill ---
+                # When the book depth on the opposite side is shallower than
+                # what we asked for, the live executor returns a partial fill.
+                # Approximate that here by drawing a fill ratio in
+                # [partial_fill_min_ratio, 1.0] with probability
+                # ``partial_fill_prob``.  Backtests that ignore this overstate
+                # PnL because they never under-allocate to good trades.
+                if (
+                    self.partial_fill_prob > 0
+                    and self._rng.random() < self.partial_fill_prob
+                ):
+                    ratio = self._rng.uniform(self.partial_fill_min_ratio, 1.0)
+                    size *= ratio
+                    partial_fills += 1
+
                 open_trade = BacktestTrade(
                     token_id=token_id,
                     entry_idx=i,
@@ -237,6 +288,8 @@ class Backtester:
             signals_generated=signals_generated,
             total_ticks=total_ticks,
             total_tokens=len(price_histories),
+            rejections_simulated=rejections_simulated,
+            partial_fills=partial_fills,
         )
 
     def _build_report(
@@ -245,6 +298,8 @@ class Backtester:
         signals_generated: int,
         total_ticks: int,
         total_tokens: int,
+        rejections_simulated: int = 0,
+        partial_fills: int = 0,
     ) -> BacktestReport:
         closed = [t for t in all_trades if t.exit_price is not None]
         wins = [t for t in closed if t.return_pct > 0]
@@ -278,6 +333,9 @@ class Backtester:
             max_drawdown_pct=max_dd,
             win_rate=win_rate,
             total_pnl=sum(pnls),
+            rejections_simulated=rejections_simulated,
+            partial_fills=partial_fills,
+            seed=self.seed,
             trades=all_trades,
         )
 

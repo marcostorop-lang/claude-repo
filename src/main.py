@@ -372,6 +372,7 @@ def run_loop(cfg: Config) -> None:
     last_reconciliation = 0.0
     last_regime_check = 0.0
     last_daily_summary_day = ""  # "YYYY-MM-DD" of the most recent dispatch
+    last_decision_log_prune = 0.0
 
     # Build the on-chain shares fetcher once per loop: it's a no-op in
     # paper mode and when the SDK isn't importable.  Stored here so the
@@ -431,6 +432,21 @@ def run_loop(cfg: Config) -> None:
                             )
             except Exception:
                 logger.exception("DB backup path crashed — continuing.")
+
+        # Periodic decision_log retention.  Cheap when there's nothing
+        # to delete; bounded once the retention window kicks in.  Skips
+        # entirely when ``decision_log_retention_days <= 0``.
+        if cfg.decision_log_retention_days > 0:
+            interval_s = max(0.0, cfg.decision_log_prune_interval_hours) * 3600.0
+            now = time.time()
+            if interval_s > 0 and (now - last_decision_log_prune) >= interval_s:
+                try:
+                    deleted = store.prune_decision_log(cfg.decision_log_retention_days)
+                    last_decision_log_prune = now
+                    if metrics.enabled and deleted > 0:
+                        metrics.emit("decision_log_prune", deleted=deleted)
+                except Exception:
+                    logger.exception("decision_log prune crashed — continuing.")
 
         # Periodic resolution sweeper — auto-closes positions whose
         # markets have settled so the portfolio stops carrying phantom
@@ -682,6 +698,111 @@ def run_loop(cfg: Config) -> None:
     store.close()
 
 
+def _decide_exit_reason(
+    pos: Position,
+    current_price: float,
+    cfg: Config,
+    risk_mgr: RiskManager,
+    store: SQLiteStore,
+    client: PolymarketClient,
+) -> str:
+    """Pure decision: return the exit reason string for this position, or ''.
+
+    Single source of truth shared by ``_check_exits_only`` and the
+    ``_tick`` exit-scan loop.  Order matters: SL > TP > edge_flip.
+    """
+    if risk_mgr.check_stop_loss(pos.entry_price, current_price):
+        return "stop_loss"
+    if risk_mgr.check_take_profit(pos.entry_price, current_price):
+        return "take_profit"
+    if cfg.exit_on_edge_flip and pos.strategy == "edge_based":
+        try:
+            from src.analysis.edge import estimate_edge
+            history = store.get_price_history(pos.token_id, limit=30)
+            if len(history) >= 4:
+                spread = client.get_spread(pos.token_id) or 0.0
+                est = estimate_edge(
+                    price=current_price, price_history=history, spread=spread,
+                )
+                threshold = cfg.exit_edge_flip_threshold
+                flipped = (
+                    (pos.side == "BUY" and est.edge < -threshold) or
+                    (pos.side == "SELL" and est.edge > threshold)
+                )
+                if flipped and est.edge_confidence > cfg.exit_edge_flip_min_confidence:
+                    return "edge_flip"
+        except Exception:
+            logger.debug(
+                "Edge-flip check failed for %s", pos.token_id[:12], exc_info=True,
+            )
+    return ""
+
+
+def _close_position_and_record(
+    *,
+    token_id: str,
+    exit_reason: str,
+    current_price: float,
+    portfolio: PortfolioTracker,
+    executor: ExecutionEngine,
+    risk_mgr: RiskManager,
+    store: SQLiteStore,
+    client: PolymarketClient,
+    cfg: Config,
+    tick_ts: str,
+    reason_suffix: str = "",
+) -> None:
+    """Execute the close, accrue fees, record the trade + decision.
+
+    Shared between the circuit-breaker-only path and the regular tick.
+    Silently no-ops when the position has been closed already (a partial
+    fill earlier in the tick can race the second loop in _tick).
+    """
+    pos = portfolio.positions.get(token_id)
+    if pos is None:
+        return
+    close_side = "SELL" if pos.side == "BUY" else "BUY"
+    current_spread = client.get_spread(token_id) or 0.0
+    order = OrderRequest(
+        token_id=token_id, condition_id=pos.condition_id,
+        side=close_side, size=pos.size, price=current_price,
+        strategy=pos.strategy, spread=current_spread, exit_reason=exit_reason,
+    )
+    result = executor.execute(order)
+    if not result.success:
+        return
+    entry_price = pos.entry_price
+    fill_size = result.filled_size if result.filled_size > 0 else pos.size
+    fill_px = result.fill_price if result.fill_price > 0 else current_price
+    _accrue_fill_fee(cfg, portfolio, fill_size, fill_px)
+    pnl = portfolio.close_position(token_id, current_price)
+    risk_mgr.record_realized_pnl(pnl)
+    return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+    reason_text = f"PnL={pnl:.4f}"
+    if reason_suffix:
+        reason_text = f"{reason_text} ({reason_suffix})"
+    store.insert_decision(
+        timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
+        action=f"EXIT_{exit_reason.upper()}", reason=reason_text,
+        strategy=pos.strategy, price=current_price, spread=current_spread,
+    )
+    store.update_calibration_exit(
+        token_id=token_id,
+        exit_timestamp=tick_ts,
+        exit_price=current_price,
+        exit_reason=exit_reason,
+        pnl=pnl,
+        return_pct=return_pct,
+    )
+    if risk_mgr.bayesian_calibrator is not None:
+        try:
+            risk_mgr.bayesian_calibrator.record_outcome(
+                strategy=pos.strategy, won=pnl > 0,
+            )
+        except Exception:
+            logger.exception("Bayesian record_outcome failed — skipped.")
+
+
 def _check_exits_only(
     risk_mgr: RiskManager,
     executor: ExecutionEngine,
@@ -690,10 +811,10 @@ def _check_exits_only(
     client: PolymarketClient,
     cfg: Config,
 ) -> None:
-    """Check SL/TP on existing positions without scanning for new entries.
+    """Check SL/TP/edge-flip on existing positions without scanning for new entries.
 
-    Used when circuit breaker is active — we still want to close losing
-    positions, but we don't want to open new ones.
+    Used when the circuit breaker is active — we still want to close
+    losing positions, but we don't want to open new ones.
     """
     tick_ts = iso_now()
     for token_id, pos in list(portfolio.positions.items()):
@@ -701,79 +822,31 @@ def _check_exits_only(
         is_zombie, fallback_price = _observe_position_price(
             portfolio, cfg, token_id, current_price,
         )
-        exit_reason = ""
         if current_price is None:
             if is_zombie and fallback_price is not None:
                 current_price = fallback_price
                 exit_reason = "zombie_close"
             else:
                 continue
-        if exit_reason:
-            pass  # already determined above (zombie close)
-        elif risk_mgr.check_stop_loss(pos.entry_price, current_price):
-            exit_reason = "stop_loss"
-        elif risk_mgr.check_take_profit(pos.entry_price, current_price):
-            exit_reason = "take_profit"
-        elif cfg.exit_on_edge_flip and pos.strategy == "edge_based":
-            try:
-                from src.analysis.edge import estimate_edge
-                history = store.get_price_history(token_id, limit=30)
-                if len(history) >= 4:
-                    spread = client.get_spread(token_id) or 0.0
-                    est = estimate_edge(
-                        price=current_price, price_history=history, spread=spread,
-                    )
-                    threshold = cfg.exit_edge_flip_threshold
-                    flipped = (
-                        (pos.side == "BUY" and est.edge < -threshold) or
-                        (pos.side == "SELL" and est.edge > threshold)
-                    )
-                    if flipped and est.edge_confidence > 0.3:
-                        exit_reason = "edge_flip"
-            except Exception:
-                logger.debug("Edge-flip check failed (circuit-breaker mode) for %s",
-                             token_id[:12], exc_info=True)
+        else:
+            exit_reason = _decide_exit_reason(
+                pos, current_price, cfg, risk_mgr, store, client,
+            )
         if not exit_reason:
             continue
-
-        close_side = "SELL" if pos.side == "BUY" else "BUY"
-        current_spread = client.get_spread(token_id) or 0.0
-        order = OrderRequest(
-            token_id=token_id, condition_id=pos.condition_id,
-            side=close_side, size=pos.size, price=current_price,
-            strategy=pos.strategy, spread=current_spread, exit_reason=exit_reason,
+        _close_position_and_record(
+            token_id=token_id,
+            exit_reason=exit_reason,
+            current_price=current_price,
+            portfolio=portfolio,
+            executor=executor,
+            risk_mgr=risk_mgr,
+            store=store,
+            client=client,
+            cfg=cfg,
+            tick_ts=tick_ts,
+            reason_suffix="circuit_breaker_mode",
         )
-        result = executor.execute(order)
-        if result.success:
-            entry_price = pos.entry_price
-            fill_size = result.filled_size if result.filled_size > 0 else pos.size
-            fill_px = result.fill_price if result.fill_price > 0 else current_price
-            _accrue_fill_fee(cfg, portfolio, fill_size, fill_px)
-            pnl = portfolio.close_position(token_id, current_price)
-            risk_mgr.record_realized_pnl(pnl)
-            return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
-            store.insert_decision(
-                timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
-                action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f} (circuit_breaker_mode)",
-                strategy=pos.strategy, price=current_price, spread=current_spread,
-            )
-            store.update_calibration_exit(
-                token_id=token_id,
-                exit_timestamp=tick_ts,
-                exit_price=current_price,
-                exit_reason=exit_reason,
-                pnl=pnl,
-                return_pct=return_pct,
-            )
-            # Bayesian update (opt-in): win = positive PnL.  Silent
-            # no-op when the calibrator isn't attached.
-            if risk_mgr.bayesian_calibrator is not None:
-                try:
-                    risk_mgr.bayesian_calibrator.record_outcome(
-                        strategy=pos.strategy, won=pnl > 0,
-                    )
-                except Exception:
-                    logger.exception("Bayesian record_outcome failed — skipped.")
 
 
 def _export_bot_state(
@@ -899,8 +972,10 @@ def _tick(
     tick_start = utc_timestamp()
     tick_ts = iso_now()
 
-    # 1. Check stop-loss / take-profit / edge-flip on existing positions
-    tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
+    # 1. Check stop-loss / take-profit / edge-flip on existing positions.
+    # Build the list first, close in a second pass — keeps the close
+    # loop from mutating ``portfolio.positions`` while we iterate it.
+    tokens_to_close: list[tuple[str, str, float]] = []  # (token_id, reason, mark_price)
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
         is_zombie, fallback_price = _observe_position_price(
@@ -912,103 +987,44 @@ def _tick(
                     "Force-closing zombie position %s at last known %.4f.",
                     token_id[:12], fallback_price,
                 )
-                tokens_to_close.append((token_id, "zombie_close"))
+                tokens_to_close.append((token_id, "zombie_close", fallback_price))
             else:
                 logger.debug("No price for position %s — skipping SL/TP check.", token_id[:12])
             continue
-        if risk_mgr.check_stop_loss(pos.entry_price, current_price):
-            logger.info("Stop-loss triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
-            tokens_to_close.append((token_id, "stop_loss"))
-        elif risk_mgr.check_take_profit(pos.entry_price, current_price):
-            logger.info("Take-profit triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
-            tokens_to_close.append((token_id, "take_profit"))
-        elif cfg.exit_on_edge_flip and pos.strategy == "edge_based":
-            # Re-estimate edge on the live position.  If it's flipped against
-            # us with meaningful magnitude, exit before we hit stop-loss —
-            # limits losses when the original thesis is invalidated.
-            try:
-                from src.analysis.edge import estimate_edge
-                history = store.get_price_history(token_id, limit=30)
-                if len(history) >= 4:
-                    spread = client.get_spread(token_id) or 0.0
-                    est = estimate_edge(
-                        price=current_price,
-                        price_history=history,
-                        spread=spread,
-                    )
-                    threshold = cfg.exit_edge_flip_threshold
-                    # BUY position + edge now strongly negative → exit
-                    flipped = (
-                        (pos.side == "BUY" and est.edge < -threshold) or
-                        (pos.side == "SELL" and est.edge > threshold)
-                    )
-                    if flipped and est.edge_confidence > 0.3:
-                        logger.info(
-                            "Edge-flip exit for %s (entry=%.4f, current=%.4f, "
-                            "new edge=%+.4f, conf=%.2f)",
-                            token_id[:12], pos.entry_price, current_price,
-                            est.edge, est.edge_confidence,
-                        )
-                        tokens_to_close.append((token_id, "edge_flip"))
-            except Exception:
-                logger.debug("Edge-flip check failed for %s", token_id[:12], exc_info=True)
+        reason = _decide_exit_reason(pos, current_price, cfg, risk_mgr, store, client)
+        if reason:
+            logger.info(
+                "%s triggered for %s (entry=%.4f, current=%.4f)",
+                reason.replace("_", " ").title(),
+                token_id[:12], pos.entry_price, current_price,
+            )
+            tokens_to_close.append((token_id, reason, current_price))
 
-    for token_id, exit_reason in tokens_to_close:
+    for token_id, exit_reason, mark_price in tokens_to_close:
         pos = portfolio.positions.get(token_id)
         if pos is None:
             continue
-        close_side = "SELL" if pos.side == "BUY" else "BUY"
-        # Prefer live price → last-known mark → entry price (worst proxy).
-        # On a zombie close the live API is mute, so the last-known
-        # observation is the most honest mark we have; falling back to
-        # entry_price would silently zero out realised PnL.
+        # Prefer the mark we already validated → live → last-known →
+        # entry price.  Falling back to entry would silently zero out
+        # realised PnL on a zombie close.
         current_price = (
-            client.get_price(token_id)
+            mark_price
+            or client.get_price(token_id)
             or (pos.last_known_price if pos.last_known_price > 0 else None)
             or pos.entry_price
         )
-        current_spread = client.get_spread(token_id) or 0.0
-        order = OrderRequest(
+        _close_position_and_record(
             token_id=token_id,
-            condition_id=pos.condition_id,
-            side=close_side,
-            size=pos.size,
-            price=current_price,
-            strategy=pos.strategy,
-            spread=current_spread,
             exit_reason=exit_reason,
+            current_price=current_price,
+            portfolio=portfolio,
+            executor=executor,
+            risk_mgr=risk_mgr,
+            store=store,
+            client=client,
+            cfg=cfg,
+            tick_ts=tick_ts,
         )
-        result = executor.execute(order)
-        if result.success:
-            entry_price = pos.entry_price
-            fill_size = result.filled_size if result.filled_size > 0 else pos.size
-            fill_px = result.fill_price if result.fill_price > 0 else current_price
-            _accrue_fill_fee(cfg, portfolio, fill_size, fill_px)
-            pnl = portfolio.close_position(token_id, current_price)
-            risk_mgr.record_realized_pnl(pnl)
-            return_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
-            store.insert_decision(
-                timestamp=tick_ts, token_id=token_id, condition_id=pos.condition_id,
-                action=f"EXIT_{exit_reason.upper()}", reason=f"PnL={pnl:.4f}",
-                strategy=pos.strategy, price=current_price, spread=current_spread,
-            )
-            store.update_calibration_exit(
-                token_id=token_id,
-                exit_timestamp=tick_ts,
-                exit_price=current_price,
-                exit_reason=exit_reason,
-                pnl=pnl,
-                return_pct=return_pct,
-            )
-            # Bayesian update (opt-in): win = positive PnL.  Silent
-            # no-op when the calibrator isn't attached.
-            if risk_mgr.bayesian_calibrator is not None:
-                try:
-                    risk_mgr.bayesian_calibrator.record_outcome(
-                        strategy=pos.strategy, won=pnl > 0,
-                    )
-                except Exception:
-                    logger.exception("Bayesian record_outcome failed — skipped.")
 
     # 2. Fetch market snapshots
     snapshots = market_svc.fetch_and_filter()
@@ -1307,8 +1323,8 @@ def _tick(
                 continue
 
             # Reject if slippage is excessive — book too thin for our size.
-            # 2% slippage means the fill price is 2% worse than best bid/ask.
-            max_slippage = 0.02
+            # Threshold lives in config (``MAX_BOOK_SLIPPAGE_PCT``).
+            max_slippage = float(getattr(cfg, "max_book_slippage_pct", 0.02))
             if slippage_pct > max_slippage:
                 risk_rejections += 1
                 store.insert_decision(
