@@ -899,6 +899,43 @@ def _export_bot_state(
             "total_closed": 0, "win_rate": 0.0,
         }
 
+        # Risk-adjusted performance over closed trades.  Computed on a
+        # rolling tail (default 200) so the figure tracks the recent
+        # regime instead of being dragged forever by the first month.
+        # Empty / tiny histories degrade to all-zero — never NaN.
+        risk_block: dict = {
+            "n": 0, "sharpe_annualized": 0.0, "sortino_annualized": 0.0,
+            "max_drawdown": 0.0, "calmar": 0.0, "psr_vs_zero": 0.0,
+            "tail_window": 0,
+        }
+        if store is not None:
+            try:
+                from src.analysis.risk_metrics import (
+                    probabilistic_sharpe_ratio, returns_summary,
+                )
+                tail = int(getattr(cfg, "risk_metrics_tail_window", 200) or 0)
+                returns = store.get_closed_trade_returns(
+                    limit=tail if tail > 0 else None,
+                )
+                if returns:
+                    rs = returns_summary(returns, periods_per_year=252)
+                    psr0 = probabilistic_sharpe_ratio(
+                        returns, benchmark_sharpe=0.0, periods_per_year=252,
+                    )
+                    risk_block = {
+                        "n": rs.n,
+                        "sharpe_annualized": round(rs.sharpe_annualized, 4),
+                        "sortino_annualized": round(rs.sortino_annualized, 4),
+                        "max_drawdown": round(rs.max_drawdown, 4),
+                        "calmar": round(rs.calmar, 4),
+                        "psr_vs_zero": round(psr0, 4),
+                        "tail_window": tail,
+                    }
+            except Exception:
+                # Risk-metrics path is purely informational; never let
+                # a bug here mask a healthy bot tick.
+                logger.debug("risk_metrics block failed", exc_info=True)
+
         realised = portfolio.realised_pnl
         fees = portfolio.fees_paid
         net_pnl_after_fees = realised + unrealised_total - fees
@@ -922,6 +959,7 @@ def _export_bot_state(
                 "net_pnl_after_fees": round(net_pnl_after_fees, 4),
             },
             "win_rate": win_stats,
+            "risk_metrics": risk_block,
             "config": {
                 "max_position_size": cfg.max_position_size,
                 "max_total_exposure": cfg.max_total_exposure,

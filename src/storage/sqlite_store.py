@@ -406,6 +406,35 @@ class SQLiteStore:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_closed_trade_returns(self, *, limit: int | None = None) -> list[float]:
+        """Return per-trade return_pct values for closed calibration entries.
+
+        Newest-first when ``limit`` is supplied (the typical use case
+        is "last N trades for a rolling Sharpe"); chronological-asc
+        when not, so callers that want a true equity curve get the
+        natural ordering.
+
+        Skips rows whose ``return_pct`` is NULL (an exit row that
+        never finished writing) so the caller never sees ``None`` in
+        the output list.
+        """
+        if limit is not None and limit > 0:
+            cur = self._conn.execute(
+                "SELECT return_pct FROM calibration "
+                "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+            rows = [float(r[0]) for r in cur.fetchall()]
+            rows.reverse()  # caller usually wants chrono order even when capped
+            return rows
+        cur = self._conn.execute(
+            "SELECT return_pct FROM calibration "
+            "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
+            "ORDER BY id ASC"
+        )
+        return [float(r[0]) for r in cur.fetchall()]
+
     def compute_win_rate(self) -> dict:
         """Aggregate realised win/loss stats from the calibration table.
 

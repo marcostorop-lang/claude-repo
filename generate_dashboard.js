@@ -526,6 +526,22 @@ tbody tr:hover{background:rgba(28,35,51,.5)}
   </div>
 </div>
 
+${botState && botState.risk_metrics && botState.risk_metrics.n > 0 ? `
+<div class="divider"></div>
+<div class="section" id="rolling-risk">
+  <h2>Rolling risk-adjusted (last ${botState.risk_metrics.tail_window || botState.risk_metrics.n} closed)</h2>
+  <div class="grid4">
+    <div class="card"><div class="stat-val ${botState.risk_metrics.sharpe_annualized >= 0 ? 'green' : 'red'}">${botState.risk_metrics.sharpe_annualized.toFixed(2)}</div><div class="stat-label">Sharpe (annualized)</div></div>
+    <div class="card"><div class="stat-val ${botState.risk_metrics.sortino_annualized >= 0 ? 'green' : 'red'}">${botState.risk_metrics.sortino_annualized.toFixed(2)}</div><div class="stat-label">Sortino (annualized)</div></div>
+    <div class="card"><div class="stat-val red">${(botState.risk_metrics.max_drawdown * 100).toFixed(2)}%</div><div class="stat-label">Max Drawdown (rolling)</div></div>
+    <div class="card"><div class="stat-val ${botState.risk_metrics.psr_vs_zero >= 0.95 ? 'green' : 'white'}">${(botState.risk_metrics.psr_vs_zero * 100).toFixed(1)}%</div><div class="stat-label">PSR vs SR=0 (n=${botState.risk_metrics.n})</div></div>
+  </div>
+  <div style="margin-top:8px;font-size:11px;color:#9ca3af">
+    PSR &ge; 95% means the observed Sharpe is statistically distinguishable from 0 after correcting for skew/kurtosis. Use <code>validate-strategy</code> for the full promote-to-live veredict.
+  </div>
+</div>
+` : ''}
+
 <div class="divider"></div>
 
 <div class="section" id="performance">

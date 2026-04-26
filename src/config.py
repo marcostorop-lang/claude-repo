@@ -680,6 +680,15 @@ class Config:
         default_factory=lambda: _env_int("LATENCY_WINDOW_SAMPLES", 500)
     )
 
+    # -- Live risk-metrics tail window ----------------------------------------
+    # Number of most-recent closed trades fed into the rolling Sharpe /
+    # Sortino / max-drawdown summary surfaced in ``bot_state.json`` and
+    # the dashboard.  ``0`` uses the entire history; smaller values
+    # track recent regime changes faster but give noisier estimates.
+    risk_metrics_tail_window: int = field(
+        default_factory=lambda: _env_int("RISK_METRICS_TAIL_WINDOW", 200)
+    )
+
     # -- Strategy validation thresholds (CLI ``validate-strategy``) ----------
     # The promote-to-live veredict requires *all* of the conditions
     # below to hold simultaneously.  Defaults are conservative (López
