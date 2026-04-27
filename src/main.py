@@ -887,6 +887,49 @@ def _check_exits_only(
         )
 
 
+def _build_equity_curves_block(
+    shadow_runners,
+    store,
+    cfg: Config,
+) -> dict:
+    """Compose the ``equity_curves`` block for ``bot_state.json``.
+
+    Two-key shape:
+      * ``live`` — list of ``{"t", "pnl"}`` points for the live series.
+      * ``shadows`` — list of ``{"strategy", "points"}`` blocks, one
+        per shadow runner (in the order they were registered).
+
+    Capped to ``EQUITY_CURVE_TAIL_POINTS`` rows per series so a
+    long-running bot doesn't blow up the dashboard JSON when the
+    history grows past a few thousand trades.
+    """
+    block = {"live": [], "shadows": []}
+    if store is None:
+        return block
+    try:
+        tail = int(getattr(cfg, "equity_curve_tail_points", 500) or 0)
+        block["live"] = store.get_equity_curve(
+            shadow=False,
+            limit=tail if tail > 0 else None,
+        )
+    except Exception:
+        logger.debug("Live equity curve failed", exc_info=True)
+    runners = list(shadow_runners or [])
+    for r in runners:
+        try:
+            name = getattr(r.strategy, "name", "")
+            if not name:
+                continue
+            pts = store.get_equity_curve(
+                shadow=True, strategy=name,
+                limit=tail if tail > 0 else None,
+            )
+            block["shadows"].append({"strategy": name, "points": pts})
+        except Exception:
+            logger.debug("Shadow equity curve failed", exc_info=True)
+    return block
+
+
 _SHADOW_RUNNER_ZERO_BLOCK = {
     "enabled": False,
     "strategy": "",
@@ -1092,6 +1135,7 @@ def _export_bot_state(
             "win_rate": win_stats,
             "risk_metrics": risk_block,
             "shadow": _build_shadow_state_block(shadow_runners, store, client, cfg),
+            "equity_curves": _build_equity_curves_block(shadow_runners, store, cfg),
             "config": {
                 "max_position_size": cfg.max_position_size,
                 "max_total_exposure": cfg.max_total_exposure,

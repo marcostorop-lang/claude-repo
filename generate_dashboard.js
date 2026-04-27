@@ -362,22 +362,84 @@ for (const dd of dailyPnl) {
   barsHtml += `<div class="bar" style="height:${h}px;background:${color}" title="${dd.date}: $${dd.pnl.toFixed(2)}"></div>`;
 }
 
-// Equity curve SVG
+// Equity curve SVG.  Prefer the backend-computed series exported in
+// ``bot_state.json`` (which always reflects the same PnL math the
+// dashboard's other cards use); fall back to the JS reconstruction
+// for legacy DBs or pre-export bot runs.  When shadows are enabled,
+// overlay one polyline per shadow series.
+const SHADOW_PALETTE = ["#60a5fa", "#a78bfa", "#f472b6", "#facc15", "#22d3ee", "#fb923c"];
+
 let equitySvg = "";
-if (equity.length > 0) {
-  const minE = Math.min(...equity.map(pp => pp.equity));
-  const maxE = Math.max(...equity.map(pp => pp.equity));
-  const range = maxE - minE || 1;
-  const points = equity.map((pp, i) => `${i * 10},${110 - ((pp.equity - minE) / range) * 100}`).join(" ");
-  const lastColor = equity[equity.length - 1].equity >= 0 ? "#22c55e" : "#ef4444";
+let equitySeries = [];
+const ec = botState && botState.equity_curves;
+if (ec && Array.isArray(ec.live) && ec.live.length > 0) {
+  equitySeries.push({
+    label: `Live (${botState.strategy || "live"})`,
+    color: ec.live[ec.live.length - 1].pnl >= 0 ? "#22c55e" : "#ef4444",
+    points: ec.live.map(pt => pt.pnl),
+    width: 2.5,
+  });
+  if (Array.isArray(ec.shadows)) {
+    ec.shadows.forEach((sh, idx) => {
+      if (!Array.isArray(sh.points) || sh.points.length === 0) return;
+      equitySeries.push({
+        label: `Shadow: ${sh.strategy}`,
+        color: SHADOW_PALETTE[idx % SHADOW_PALETTE.length],
+        points: sh.points.map(pt => pt.pnl),
+        width: 1.5,
+      });
+    });
+  }
+} else if (equity.length > 0) {
+  // Fallback: use the JS-reconstructed series if the backend hasn't
+  // exported one yet.
+  equitySeries.push({
+    label: "Live (reconstructed)",
+    color: equity[equity.length - 1].equity >= 0 ? "#22c55e" : "#ef4444",
+    points: equity.map(pp => pp.equity),
+    width: 2.5,
+  });
+}
+
+if (equitySeries.length > 0) {
+  const allVals = equitySeries.flatMap(s => s.points);
+  const minE = Math.min(0, ...allVals);
+  const maxE = Math.max(0, ...allVals);
+  const range = (maxE - minE) || 1;
+  // Width per series = max length × 10 (so the chart accommodates
+  // the longest history); shorter series are scaled to the same x
+  // axis so legs line up by *trade index*, not wall-clock time.
+  const maxLen = Math.max(...equitySeries.map(s => s.points.length));
+  const xStep = 10;
+  const polylines = equitySeries.map(s => {
+    const stride = s.points.length > 1 ? (maxLen - 1) / (s.points.length - 1) : 0;
+    const pts = s.points.map((v, i) => {
+      const x = (s.points.length === 1 ? maxLen - 1 : stride * i) * xStep;
+      const y = 110 - ((v - minE) / range) * 100;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="${s.width}" stroke-linejoin="round"/>`;
+  }).join("");
+  // Zero-line for visual reference.
+  const yZero = 110 - ((0 - minE) / range) * 100;
+  const zeroLine = (minE < 0 && maxE > 0)
+    ? `<line x1="0" y1="${yZero.toFixed(1)}" x2="${(maxLen - 1) * xStep}" y2="${yZero.toFixed(1)}" stroke="#374151" stroke-width="0.5" stroke-dasharray="3 3"/>`
+    : "";
+  const legend = equitySeries.map(s => `
+    <span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px">
+      <span style="width:14px;height:3px;background:${s.color};display:inline-block;border-radius:2px"></span>
+      <span style="font-size:11px;color:#d1d5db">${s.label} <span style="color:#6b7280">(n=${s.points.length})</span></span>
+    </span>`).join("");
   equitySvg = `<div class="card" style="margin-top:12px">
-    <h3>Equity Curve</h3>
-    <svg viewBox="0 0 ${equity.length * 10} 120" style="width:100%;height:120px" preserveAspectRatio="none">
-      <polyline points="${points}" fill="none" stroke="${lastColor}" stroke-width="2"/>
+    <h3>Equity Curve${equitySeries.length > 1 ? " — Live vs Shadows" : ""}</h3>
+    <svg viewBox="0 0 ${(maxLen - 1) * xStep} 120" style="width:100%;height:160px" preserveAspectRatio="none">
+      ${zeroLine}
+      ${polylines}
     </svg>
     <div style="display:flex;justify-content:space-between;font-size:10px;color:#6b7280;margin-top:4px">
       <span>$${minE.toFixed(2)}</span><span>$${maxE.toFixed(2)}</span>
     </div>
+    <div style="margin-top:8px">${legend}</div>
   </div>`;
 }
 

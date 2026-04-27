@@ -702,6 +702,13 @@ class Config:
     risk_metrics_tail_window: int = field(
         default_factory=lambda: _env_int("RISK_METRICS_TAIL_WINDOW", 200)
     )
+    # Cap on the number of equity-curve points exported per series in
+    # ``bot_state.json``.  Larger values give a longer history but
+    # bloat the JSON the dashboard reads every regen.  ``0`` lifts
+    # the cap (export the whole curve).
+    equity_curve_tail_points: int = field(
+        default_factory=lambda: _env_int("EQUITY_CURVE_TAIL_POINTS", 500)
+    )
 
     # -- Strategy validation thresholds (CLI ``validate-strategy``) ----------
     # The promote-to-live veredict requires *all* of the conditions

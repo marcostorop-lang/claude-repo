@@ -573,6 +573,54 @@ class SQLiteStore:
         )
         return [float(r[0]) for r in cur.fetchall()]
 
+    def get_equity_curve(
+        self,
+        *,
+        shadow: bool = False,
+        strategy: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Return cumulative-PnL equity-curve points for a closed-trade series.
+
+        Each point is ``{"t": "<exit_timestamp ISO>", "pnl": <cumulative>}``.
+        Live series reads ``calibration``; shadow series reads
+        ``shadow_calibration``.  ``strategy`` filters by writer name
+        (only meaningful for shadow); ``limit`` keeps the most recent
+        N rows but the returned list is still chronological.
+
+        Calculated in the backend so the dashboard never recomputes
+        PnL from raw trades — same principle as the win-rate /
+        risk-metrics blocks.
+        """
+        table = "shadow_calibration" if shadow else "calibration"
+        where = ["exit_timestamp IS NOT NULL", "pnl IS NOT NULL"]
+        params: list = []
+        if strategy:
+            where.append("strategy = ?")
+            params.append(strategy)
+        where_sql = " AND ".join(where)
+        if limit is not None and limit > 0:
+            cur = self._conn.execute(
+                f"SELECT exit_timestamp, pnl FROM {table} WHERE {where_sql} "
+                f"ORDER BY exit_timestamp DESC LIMIT ?",
+                (*params, int(limit)),
+            )
+            rows = list(cur.fetchall())
+            rows.reverse()
+        else:
+            cur = self._conn.execute(
+                f"SELECT exit_timestamp, pnl FROM {table} WHERE {where_sql} "
+                f"ORDER BY exit_timestamp ASC",
+                tuple(params),
+            )
+            rows = list(cur.fetchall())
+        out: list[dict] = []
+        cum = 0.0
+        for ts, pnl in rows:
+            cum += float(pnl)
+            out.append({"t": ts, "pnl": round(cum, 4)})
+        return out
+
     def compute_shadow_win_rate(self, *, strategy: str | None = None) -> dict:
         """Same contract as :meth:`compute_win_rate` but over shadow exits.
 
