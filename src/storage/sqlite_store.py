@@ -541,29 +541,54 @@ class SQLiteStore:
         )
         self._conn.commit()
 
-    def get_shadow_closed_returns(self, *, limit: int | None = None) -> list[float]:
+    def get_shadow_closed_returns(
+        self, *, limit: int | None = None, strategy: str | None = None,
+    ) -> list[float]:
+        """Per-trade returns from ``shadow_calibration``.
+
+        ``strategy`` filters by the writer's strategy name so multi-
+        shadow setups don't collapse different runners into one
+        series.  ``None`` (default) returns the union — useful for
+        the legacy single-shadow case and for aggregate dashboards.
+        """
+        where = ["exit_timestamp IS NOT NULL", "return_pct IS NOT NULL"]
+        params: list = []
+        if strategy:
+            where.append("strategy = ?")
+            params.append(strategy)
+        where_sql = " AND ".join(where)
         if limit is not None and limit > 0:
             cur = self._conn.execute(
-                "SELECT return_pct FROM shadow_calibration "
-                "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
-                "ORDER BY id DESC LIMIT ?",
-                (int(limit),),
+                f"SELECT return_pct FROM shadow_calibration WHERE {where_sql} "
+                f"ORDER BY id DESC LIMIT ?",
+                (*params, int(limit)),
             )
             rows = [float(r[0]) for r in cur.fetchall()]
             rows.reverse()
             return rows
         cur = self._conn.execute(
-            "SELECT return_pct FROM shadow_calibration "
-            "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
-            "ORDER BY id ASC"
+            f"SELECT return_pct FROM shadow_calibration WHERE {where_sql} "
+            f"ORDER BY id ASC",
+            tuple(params),
         )
         return [float(r[0]) for r in cur.fetchall()]
 
-    def compute_shadow_win_rate(self) -> dict:
-        """Same contract as :meth:`compute_win_rate` but over shadow exits."""
-        cur = self._conn.execute(
-            "SELECT pnl FROM shadow_calibration WHERE exit_timestamp IS NOT NULL"
-        )
+    def compute_shadow_win_rate(self, *, strategy: str | None = None) -> dict:
+        """Same contract as :meth:`compute_win_rate` but over shadow exits.
+
+        ``strategy`` filters by writer; ``None`` aggregates across all
+        shadow runners.
+        """
+        if strategy:
+            cur = self._conn.execute(
+                "SELECT pnl FROM shadow_calibration "
+                "WHERE exit_timestamp IS NOT NULL AND strategy = ?",
+                (strategy,),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT pnl FROM shadow_calibration WHERE exit_timestamp IS NOT NULL"
+            )
         wins = losses = breakeven = 0
         for (pnl,) in cur.fetchall():
             if pnl is None:

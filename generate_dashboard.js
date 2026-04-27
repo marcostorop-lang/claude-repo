@@ -542,32 +542,37 @@ ${botState && botState.risk_metrics && botState.risk_metrics.n > 0 ? `
 </div>
 ` : ''}
 
-${botState && botState.shadow && botState.shadow.enabled ? (() => {
-  const sh = botState.shadow;
-  const shrm = sh.risk_metrics || {n: 0};
+${botState && botState.shadow && Array.isArray(botState.shadow.runners) && botState.shadow.runners.length > 0 ? (() => {
   const liveSharpe = (botState.risk_metrics && botState.risk_metrics.sharpe_annualized) || 0;
   const livePnl = (botState.portfolio && botState.portfolio.net_pnl_after_fees) || 0;
-  const shadowNet = sh.realised_pnl + sh.unrealised_pnl - sh.fees_paid;
-  const sharpeDiff = shrm.sharpe_annualized - liveSharpe;
-  const pnlDiff = shadowNet - livePnl;
+  const cards = botState.shadow.runners.map(sh => {
+    const shrm = sh.risk_metrics || {n: 0, sharpe_annualized: 0, psr_vs_zero: 0};
+    const shadowNet = (sh.realised_pnl || 0) + (sh.unrealised_pnl || 0) - (sh.fees_paid || 0);
+    const sharpeDiff = (shrm.sharpe_annualized || 0) - liveSharpe;
+    const pnlDiff = shadowNet - livePnl;
+    const wr = sh.win_rate || {total_closed: 0, win_rate: 0};
+    return `
+<div class="card" style="text-align:left;padding:14px">
+  <div style="font-weight:600;margin-bottom:8px">${sh.strategy} <span style="font-size:11px;color:#9ca3af">vs ${botState.strategy}</span></div>
+  <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px 14px;font-size:12px">
+    <div><span style="color:#9ca3af">Closed n:</span> <span class="mono">${shrm.n || 0}</span></div>
+    <div><span style="color:#9ca3af">Win rate:</span> <span class="mono">${wr.total_closed ? (wr.win_rate * 100).toFixed(1) + '%' : '—'}</span></div>
+    <div><span style="color:#9ca3af">Net PnL:</span> <span class="mono ${shadowNet >= 0 ? 'green' : 'red'}">$${shadowNet.toFixed(2)}</span></div>
+    <div><span style="color:#9ca3af">Open:</span> <span class="mono">${sh.open_positions}</span></div>
+    <div><span style="color:#9ca3af">Sharpe:</span> <span class="mono ${(shrm.sharpe_annualized || 0) >= 0 ? 'green' : 'red'}">${(shrm.sharpe_annualized || 0).toFixed(2)}</span></div>
+    <div><span style="color:#9ca3af">PSR:</span> <span class="mono ${(shrm.psr_vs_zero || 0) >= 0.95 ? 'green' : 'white'}">${((shrm.psr_vs_zero || 0) * 100).toFixed(1)}%</span></div>
+    <div><span style="color:#9ca3af">&Delta;PnL:</span> <span class="mono ${pnlDiff >= 0 ? 'green' : 'red'}">${pnlDiff >= 0 ? '+' : ''}$${pnlDiff.toFixed(2)}</span></div>
+    <div><span style="color:#9ca3af">&Delta;Sharpe:</span> <span class="mono ${sharpeDiff >= 0 ? 'green' : 'red'}">${sharpeDiff >= 0 ? '+' : ''}${sharpeDiff.toFixed(2)}</span></div>
+  </div>
+</div>`;
+  }).join('');
   return `
 <div class="divider"></div>
 <div class="section" id="ab-shadow">
-  <h2>A/B shadow: ${sh.strategy} <span style="font-size:12px;color:#9ca3af">vs live ${botState.strategy}</span></h2>
-  <div class="grid4">
-    <div class="card"><div class="stat-val white">${shrm.n || 0}</div><div class="stat-label">Shadow closed trades</div></div>
-    <div class="card"><div class="stat-val ${shadowNet >= 0 ? 'green' : 'red'}">$${shadowNet.toFixed(2)}</div><div class="stat-label">Shadow net PnL</div></div>
-    <div class="card"><div class="stat-val ${shrm.sharpe_annualized >= 0 ? 'green' : 'red'}">${(shrm.sharpe_annualized || 0).toFixed(2)}</div><div class="stat-label">Shadow Sharpe</div></div>
-    <div class="card"><div class="stat-val ${(shrm.psr_vs_zero || 0) >= 0.95 ? 'green' : 'white'}">${((shrm.psr_vs_zero || 0) * 100).toFixed(1)}%</div><div class="stat-label">Shadow PSR vs 0</div></div>
-  </div>
-  <div class="grid4" style="margin-top:8px">
-    <div class="card"><div class="stat-val ${pnlDiff >= 0 ? 'green' : 'red'}">${pnlDiff >= 0 ? '+' : ''}$${pnlDiff.toFixed(2)}</div><div class="stat-label">Shadow &minus; Live PnL</div></div>
-    <div class="card"><div class="stat-val ${sharpeDiff >= 0 ? 'green' : 'red'}">${sharpeDiff >= 0 ? '+' : ''}${sharpeDiff.toFixed(2)}</div><div class="stat-label">Shadow &minus; Live Sharpe</div></div>
-    <div class="card"><div class="stat-val white">${sh.open_positions}</div><div class="stat-label">Shadow open positions</div></div>
-    <div class="card"><div class="stat-val white">${(sh.win_rate && sh.win_rate.total_closed) ? (sh.win_rate.win_rate * 100).toFixed(1) + '%' : '0%'}</div><div class="stat-label">Shadow win rate</div></div>
-  </div>
+  <h2>A/B shadow runners (${botState.shadow.n_runners})</h2>
+  <div class="${botState.shadow.runners.length === 1 ? 'grid2' : 'grid2'}">${cards}</div>
   <div style="margin-top:8px;font-size:11px;color:#9ca3af">
-    Shadow runs in parallel on the same market data and never places orders. Run <code>shadow-report</code> for a full head-to-head and <code>validate-strategy</code> before promoting it to live.
+    Shadow runners observe the same filtered universe as the live strategy and never place orders. <code>&Delta;</code> values are shadow &minus; live. Use <code>shadow-report</code> for a head-to-head table and <code>validate-strategy</code> before promoting any candidate to live.
   </div>
 </div>`;
 })() : ''}

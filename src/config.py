@@ -680,17 +680,18 @@ class Config:
         default_factory=lambda: _env_int("LATENCY_WINDOW_SAMPLES", 500)
     )
 
-    # -- A/B shadow strategy (opt-in) ------------------------------------------
-    # When set to a strategy name (e.g. ``edge_based``) different from
-    # ``STRATEGY``, the bot evaluates that second strategy in parallel
-    # on every tick.  The shadow has its own in-memory PortfolioTracker
-    # and writes to ``shadow_decision_log`` + ``shadow_calibration``
-    # tables — it never places orders, never touches the real
-    # portfolio, and never affects PnL.  Lets an operator A/B-test a
-    # candidate strategy on real market data without spinning up a
-    # second bot instance.  Empty string (default) disables.
+    # -- A/B(/C/…) shadow strategies (opt-in) ----------------------------------
+    # ``SHADOW_STRATEGY`` (singular, legacy) takes one strategy name.
+    # ``SHADOW_STRATEGIES`` (plural, CSV) takes any number — for example
+    # ``edge_based,mean_reversion,semantic_mispricing``.  Both are
+    # merged via :meth:`shadow_strategy_list` so old configs keep
+    # working byte-for-byte.  The runner ignores the live strategy
+    # name (no fake A/B with itself) and de-duplicates.
     shadow_strategy: str = field(
         default_factory=lambda: _env("SHADOW_STRATEGY", "")
+    )
+    shadow_strategies: str = field(
+        default_factory=lambda: _env("SHADOW_STRATEGIES", "")
     )
 
     # -- Live risk-metrics tail window ----------------------------------------
@@ -775,6 +776,29 @@ class Config:
             and self.allow_live_trading
             and self.i_understand_real_money == self.LIVE_CONFIRMATION_PHRASE
         )
+
+    def shadow_strategy_list(self) -> list[str]:
+        """Return the de-duplicated list of shadow strategies to run.
+
+        Combines the legacy ``SHADOW_STRATEGY`` (singular) and the new
+        ``SHADOW_STRATEGIES`` (CSV) fields, strips whitespace, drops
+        the live ``STRATEGY`` if present (no fake A/B with self), and
+        preserves first-seen order so dashboards render predictably.
+        """
+        raw = []
+        if (self.shadow_strategy or "").strip():
+            raw.append(self.shadow_strategy.strip())
+        if (self.shadow_strategies or "").strip():
+            raw.extend(part.strip() for part in self.shadow_strategies.split(","))
+        live = (self.strategy or "").strip()
+        seen: set[str] = set()
+        out: list[str] = []
+        for name in raw:
+            if not name or name == live or name in seen:
+                continue
+            seen.add(name)
+            out.append(name)
+        return out
 
     def effective_min_edge(self, category: str = "") -> float:
         """Return the min-edge threshold for a given market category.

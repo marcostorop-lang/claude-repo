@@ -284,11 +284,13 @@ class TestExportShadowBlock:
             risk_mgr.daily_pnl = 0.0
             _export_bot_state(
                 cfg, PortfolioTracker(), risk_mgr, strategy,
-                1, client, store, shadow_runner=None,
+                1, client, store, shadow_runners=[],
             )
             data = json.loads((tmp_path / "bot_state.json").read_text())
             assert data["shadow"]["enabled"] is False
             assert data["shadow"]["open_positions"] == 0
+            assert data["shadow"]["n_runners"] == 0
+            assert data["shadow"]["runners"] == []
         finally:
             store.close()
 
@@ -309,14 +311,158 @@ class TestExportShadowBlock:
             runner.evaluate_entries([_snap(price=0.50, spread=0.0)], store, lambda tid: [])
             _export_bot_state(
                 cfg, PortfolioTracker(), risk_mgr, strategy,
-                1, client, store, shadow_runner=runner,
+                1, client, store, shadow_runners=[runner],
             )
             data = json.loads((tmp_path / "bot_state.json").read_text())
             sh = data["shadow"]
+            # Top-level keys mirror the first runner (back-compat).
             assert sh["enabled"] is True
             assert sh["strategy"] == "fixed"
             assert sh["open_positions"] == 1
-            # No closed trades yet → win_rate.total_closed == 0.
-            assert sh["win_rate"]["total_closed"] == 0
+            # New ``runners`` shape.
+            assert sh["n_runners"] == 1
+            assert len(sh["runners"]) == 1
+            assert sh["runners"][0]["strategy"] == "fixed"
+            assert sh["runners"][0]["open_positions"] == 1
         finally:
             store.close()
+
+
+# ---------------------------------------------------------------------------
+# Multi-runner: list integrity + per-runner row separation
+# ---------------------------------------------------------------------------
+
+
+class _NamedFixedStrategy(_FixedStrategy):
+    """``_FixedStrategy`` with a configurable strategy name so the
+    multi-shadow tests can verify rows tag the right writer."""
+
+    def __init__(self, name: str, signal: Signal) -> None:
+        super().__init__(signal)
+        self.name = name
+
+
+class TestMultiShadow:
+    def test_rows_tag_strategy_per_runner(self, tmp_path):
+        cfg = Config()
+        store = SQLiteStore(str(tmp_path / "t.db"))
+        try:
+            r1 = ShadowRunner(cfg, _NamedFixedStrategy("alpha", Signal(Action.BUY, 0.7, "")))
+            r2 = ShadowRunner(cfg, _NamedFixedStrategy("beta", Signal(Action.BUY, 0.7, "")))
+            # Different tokens so neither runner blocks the other on
+            # the duplicate-position rule.
+            for r, snap in ((r1, _snap("a", 0.5)), (r2, _snap("b", 0.5))):
+                r.evaluate_entries([snap], store, lambda tid: [])
+            cur = store._conn.execute(
+                "SELECT strategy, COUNT(*) FROM shadow_calibration GROUP BY strategy",
+            )
+            counts = dict(cur.fetchall())
+            assert counts == {"alpha": 1, "beta": 1}
+        finally:
+            store.close()
+
+    def test_compute_shadow_win_rate_filters_by_strategy(self, tmp_path):
+        store = SQLiteStore(str(tmp_path / "t.db"))
+        try:
+            # alpha: 1 win, 1 loss; beta: 2 wins.
+            for strat, pnl in (("alpha", 1.0), ("alpha", -1.0), ("beta", 1.0), ("beta", 1.0)):
+                store.insert_shadow_calibration_entry(
+                    entry_timestamp="2026-01-01T00:00:00Z",
+                    token_id=f"{strat}-x",
+                    strategy=strat, confidence=0.5, entry_price=0.5,
+                )
+                store.update_shadow_calibration_exit(
+                    token_id=f"{strat}-x",
+                    exit_timestamp="2026-01-01T01:00:00Z",
+                    exit_price=0.5, exit_reason="tp",
+                    pnl=pnl, return_pct=pnl,
+                )
+            assert store.compute_shadow_win_rate(strategy="alpha")["wins"] == 1
+            assert store.compute_shadow_win_rate(strategy="alpha")["losses"] == 1
+            assert store.compute_shadow_win_rate(strategy="beta")["wins"] == 2
+            # Unfiltered = union.
+            assert store.compute_shadow_win_rate()["wins"] == 3
+        finally:
+            store.close()
+
+    def test_get_shadow_closed_returns_filters_by_strategy(self, tmp_path):
+        store = SQLiteStore(str(tmp_path / "t.db"))
+        try:
+            for strat, r in (("alpha", 0.05), ("beta", -0.02), ("alpha", 0.01)):
+                store.insert_shadow_calibration_entry(
+                    entry_timestamp="2026-01-01T00:00:00Z",
+                    token_id=f"{strat}-y",
+                    strategy=strat, confidence=0.5, entry_price=0.5,
+                )
+                store.update_shadow_calibration_exit(
+                    token_id=f"{strat}-y",
+                    exit_timestamp="2026-01-01T01:00:00Z",
+                    exit_price=0.5, exit_reason="tp",
+                    pnl=r, return_pct=r,
+                )
+            assert store.get_shadow_closed_returns(strategy="alpha") == [0.05, 0.01]
+            assert store.get_shadow_closed_returns(strategy="beta") == [-0.02]
+            assert store.get_shadow_closed_returns() == [0.05, -0.02, 0.01]
+        finally:
+            store.close()
+
+    def test_export_state_has_one_runner_block_per_runner(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        from src.main import _export_bot_state
+        cfg = Config()
+        store = SQLiteStore(str(tmp_path / "t.db"))
+        try:
+            monkeypatch.chdir(tmp_path)
+            client = MagicMock(); client.get_price.return_value = None
+            strategy = MagicMock(); strategy.name = "live"
+            risk_mgr = MagicMock()
+            risk_mgr.is_circuit_breaker_active = False
+            risk_mgr.daily_pnl = 0.0
+            r1 = ShadowRunner(cfg, _NamedFixedStrategy("alpha", Signal(Action.HOLD, 0.0, "")))
+            r2 = ShadowRunner(cfg, _NamedFixedStrategy("beta", Signal(Action.HOLD, 0.0, "")))
+            _export_bot_state(
+                cfg, PortfolioTracker(), risk_mgr, strategy,
+                1, client, store, shadow_runners=[r1, r2],
+            )
+            data = json.loads((tmp_path / "bot_state.json").read_text())
+            sh = data["shadow"]
+            assert sh["n_runners"] == 2
+            names = [r["strategy"] for r in sh["runners"]]
+            assert names == ["alpha", "beta"]
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
+# Config.shadow_strategy_list
+# ---------------------------------------------------------------------------
+
+
+class TestShadowStrategyList:
+    def test_legacy_singular(self, monkeypatch):
+        monkeypatch.setenv("STRATEGY", "live")
+        monkeypatch.setenv("SHADOW_STRATEGY", "alpha")
+        monkeypatch.delenv("SHADOW_STRATEGIES", raising=False)
+        cfg = Config()
+        assert cfg.shadow_strategy_list() == ["alpha"]
+
+    def test_csv_plural(self, monkeypatch):
+        monkeypatch.setenv("STRATEGY", "live")
+        monkeypatch.delenv("SHADOW_STRATEGY", raising=False)
+        monkeypatch.setenv("SHADOW_STRATEGIES", "alpha, beta ,gamma")
+        cfg = Config()
+        assert cfg.shadow_strategy_list() == ["alpha", "beta", "gamma"]
+
+    def test_drops_live_and_dedupes(self, monkeypatch):
+        monkeypatch.setenv("STRATEGY", "live")
+        monkeypatch.setenv("SHADOW_STRATEGY", "alpha")
+        monkeypatch.setenv("SHADOW_STRATEGIES", "alpha,live,beta,beta,alpha")
+        cfg = Config()
+        assert cfg.shadow_strategy_list() == ["alpha", "beta"]
+
+    def test_empty_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("STRATEGY", "live")
+        monkeypatch.delenv("SHADOW_STRATEGY", raising=False)
+        monkeypatch.delenv("SHADOW_STRATEGIES", raising=False)
+        cfg = Config()
+        assert cfg.shadow_strategy_list() == []
