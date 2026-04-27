@@ -108,6 +108,22 @@ class Config:
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 0.20))
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5))
     max_daily_loss: float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS", 50.0))
+    # Max drawdown circuit breaker — complementary to MAX_DAILY_LOSS.
+    # Daily-loss is brittle: an 8% intraday slide can stop just shy of
+    # the daily cap and the bot keeps trading inside an obviously
+    # broken regime.  The drawdown breaker tracks equity-peak *across
+    # sessions* (persisted in ``risk_state``) and trips when current
+    # equity falls below ``peak * (1 - MAX_DRAWDOWN_PCT)``.  Trip is
+    # sticky: only the operator can clear it by touching the ack file.
+    # ``0.0`` (default) disables the feature.
+    max_drawdown_pct: float = field(
+        default_factory=lambda: _env_float("MAX_DRAWDOWN_PCT", 0.0)
+    )
+    drawdown_breaker_ack_file: str = field(
+        default_factory=lambda: _env(
+            "DRAWDOWN_BREAKER_ACK_FILE", "drawdown_breaker_acknowledged.ack",
+        )
+    )
     max_exposure_per_event: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_EVENT", 100.0))
     # When True, positions that are opposing sides of the same binary event
     # (BUY Yes + BUY No on the same condition_id, or symmetric shorts) are

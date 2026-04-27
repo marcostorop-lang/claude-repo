@@ -68,6 +68,17 @@ class RiskManager:
         # shouldn't halt the bot forever on the next launch.
         self.regime_paused: bool = False
         self.regime_pause_reason: str = ""
+        # Drawdown circuit breaker.  Equity peak persists across
+        # restarts via the optional ``store`` attached by ``run_loop``;
+        # ``None`` means no persistence (tests + tools that build a
+        # bare RiskManager).  Trip is sticky — only an ack file
+        # touched by the operator clears it, matching the live
+        # autopause's contract.
+        self._equity_peak: float = 0.0
+        self._equity_peak_ts: str = ""
+        self._drawdown_breaker_tripped: bool = False
+        self._drawdown_breaker_reason: str = ""
+        self.store = None  # set by run_loop after construction
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -129,10 +140,126 @@ class RiskManager:
             self._current_date = today
             self._circuit_breaker_tripped = False
 
+    # ------------------------------------------------------------------
+    # Drawdown circuit breaker
+    # ------------------------------------------------------------------
+
+    def seed_drawdown_state(self) -> None:
+        """Read the persisted drawdown state from ``self.store`` if present.
+
+        Idempotent — safe to call once at startup and again later.
+        Missing rows are treated as a clean slate (peak=0, untripped).
+        """
+        if self.store is None:
+            return
+        try:
+            peak = self.store.get_risk_state("equity_peak")
+            peak_ts = self.store.get_risk_state("equity_peak_ts")
+            tripped = self.store.get_risk_state("drawdown_breaker_tripped")
+            reason = self.store.get_risk_state("drawdown_breaker_reason")
+            if peak is not None:
+                self._equity_peak = float(peak)
+            if peak_ts is not None:
+                self._equity_peak_ts = peak_ts
+            self._drawdown_breaker_tripped = tripped == "1"
+            if reason is not None:
+                self._drawdown_breaker_reason = reason
+            if self._drawdown_breaker_tripped:
+                logger.warning(
+                    "DRAWDOWN BREAKER tripped on startup (persisted): %s",
+                    self._drawdown_breaker_reason or "(no reason)",
+                )
+        except Exception:
+            logger.exception("Could not seed drawdown state — starting clean.")
+
+    def update_equity(self, equity_usd: float) -> None:
+        """Track equity peak and trip the drawdown breaker if breached.
+
+        ``equity_usd`` should be ``realised_pnl + unrealised_pnl`` (or
+        any consistent equity proxy).  We update the running peak and,
+        when the drawdown from peak crosses ``MAX_DRAWDOWN_PCT``, set
+        the breaker to "tripped" and persist that to ``risk_state`` so
+        a restart cannot silently undo it.
+
+        ``MAX_DRAWDOWN_PCT <= 0`` short-circuits — feature stays off.
+        """
+        max_dd = float(getattr(self.cfg, "max_drawdown_pct", 0.0) or 0.0)
+        if max_dd <= 0:
+            return
+        if equity_usd > self._equity_peak:
+            self._equity_peak = float(equity_usd)
+            self._equity_peak_ts = datetime.now(timezone.utc).isoformat()
+            if self.store is not None:
+                try:
+                    self.store.set_risk_state("equity_peak", f"{self._equity_peak:.6f}")
+                    self.store.set_risk_state("equity_peak_ts", self._equity_peak_ts)
+                except Exception:
+                    logger.debug("Persist equity_peak failed", exc_info=True)
+        if self._drawdown_breaker_tripped:
+            return  # already tripped; nothing more to do until ack
+        if self._equity_peak <= 0:
+            return  # cold start — no peak yet
+        threshold = self._equity_peak * (1.0 - max_dd)
+        if equity_usd < threshold:
+            self._drawdown_breaker_tripped = True
+            self._drawdown_breaker_reason = (
+                f"equity ${equity_usd:.2f} fell below "
+                f"peak ${self._equity_peak:.2f} × (1 - {max_dd:.2%}) "
+                f"= ${threshold:.2f}"
+            )
+            logger.warning("DRAWDOWN BREAKER TRIPPED: %s", self._drawdown_breaker_reason)
+            if self.store is not None:
+                try:
+                    self.store.set_risk_state("drawdown_breaker_tripped", "1")
+                    self.store.set_risk_state(
+                        "drawdown_breaker_reason", self._drawdown_breaker_reason,
+                    )
+                except Exception:
+                    logger.debug("Persist drawdown trip failed", exc_info=True)
+
+    def _drawdown_breaker_ack_observed(self) -> bool:
+        """Has the operator dropped the configured ack file in cwd?"""
+        path = getattr(self.cfg, "drawdown_breaker_ack_file", "") or ""
+        if not path:
+            return False
+        try:
+            import os
+            return os.path.exists(path)
+        except Exception:
+            return False
+
+    def reset_drawdown_breaker(self) -> None:
+        """Clear the drawdown trip and zero the persisted state.
+
+        Called automatically by ``is_circuit_breaker_active`` when the
+        ack file is observed.  Logs at warning level (not info) because
+        clearing a safety gate is significant.
+        """
+        if not self._drawdown_breaker_tripped:
+            return
+        logger.warning(
+            "Drawdown breaker cleared by ack file (was: %s).",
+            self._drawdown_breaker_reason or "(no reason)",
+        )
+        self._drawdown_breaker_tripped = False
+        self._drawdown_breaker_reason = ""
+        if self.store is not None:
+            try:
+                self.store.set_risk_state("drawdown_breaker_tripped", "0")
+                self.store.delete_risk_state("drawdown_breaker_reason")
+            except Exception:
+                logger.debug("Clear drawdown trip failed", exc_info=True)
+
+    @property
+    def is_drawdown_breaker_active(self) -> bool:
+        if self._drawdown_breaker_tripped and self._drawdown_breaker_ack_observed():
+            self.reset_drawdown_breaker()
+        return self._drawdown_breaker_tripped
+
     @property
     def is_circuit_breaker_active(self) -> bool:
         self._maybe_reset_daily()
-        return self._circuit_breaker_tripped
+        return self._circuit_breaker_tripped or self.is_drawdown_breaker_active
 
     @property
     def daily_pnl(self) -> float:
@@ -316,8 +443,21 @@ class RiskManager:
             return RiskVerdict(False, 0.0, "HOLD signal — no trade.")
 
         # --- Circuit breaker ---
-        if self.is_circuit_breaker_active and signal.action == Action.BUY:
-            return RiskVerdict(False, 0.0, f"Circuit breaker: daily loss ${abs(self._daily_realized_pnl):.2f} exceeds limit.")
+        # Two breakers in this gate: daily loss (resets at UTC midnight)
+        # and drawdown (sticky, cleared by ack file).  Either active
+        # blocks new BUYs but never SELLs — exits always fire.
+        if signal.action == Action.BUY:
+            if self._drawdown_breaker_tripped and not self._drawdown_breaker_ack_observed():
+                return RiskVerdict(
+                    False, 0.0,
+                    f"Drawdown breaker active: {self._drawdown_breaker_reason} "
+                    f"(touch {self.cfg.drawdown_breaker_ack_file} to acknowledge).",
+                )
+            if self.is_circuit_breaker_active:
+                return RiskVerdict(
+                    False, 0.0,
+                    f"Circuit breaker: daily loss ${abs(self._daily_realized_pnl):.2f} exceeds limit.",
+                )
 
         # --- Temporal edge filter ---
         # Only gates new BUYs — SELL exits always fire (don't strand

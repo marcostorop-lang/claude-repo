@@ -227,6 +227,19 @@ class SQLiteStore:
                 updated_at       TEXT NOT NULL
             )
         """)
+        # Persistent key/value store for risk-manager state that needs
+        # to survive restarts.  Currently used by the drawdown breaker
+        # (``equity_peak``, ``equity_peak_ts``, ``drawdown_breaker_tripped``)
+        # but kept generic so future pieces of risk state (rolling
+        # variance estimators, regime-shift counters, etc.) can land
+        # here without another schema change.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS risk_state (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -647,6 +660,30 @@ class SQLiteStore:
             "DELETE FROM position_price_state WHERE token_id = ?",
             (token_id,),
         )
+        self._conn.commit()
+
+    # -- Generic risk-manager state (key/value) -------------------------------
+
+    def get_risk_state(self, key: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT value FROM risk_state WHERE key = ?", (key,),
+        )
+        row = cur.fetchone()
+        return None if row is None else row[0]
+
+    def set_risk_state(self, key: str, value: str) -> None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO risk_state (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+            "                                updated_at=excluded.updated_at",
+            (key, str(value), now),
+        )
+        self._conn.commit()
+
+    def delete_risk_state(self, key: str) -> None:
+        self._conn.execute("DELETE FROM risk_state WHERE key = ?", (key,))
         self._conn.commit()
 
     def get_equity_curve(

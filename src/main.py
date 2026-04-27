@@ -204,6 +204,8 @@ def run_loop(cfg: Config) -> None:
         logger.exception("Could not hydrate position_price_state — continuing.")
 
     risk_mgr = RiskManager(cfg, portfolio)
+    risk_mgr.store = store  # enables drawdown-state persistence
+    risk_mgr.seed_drawdown_state()
     if reconstruct_stats:
         pnl_today = float(reconstruct_stats.get("realised_pnl_today", 0.0) or 0.0)
         if pnl_today != 0.0:
@@ -778,6 +780,17 @@ def run_loop(cfg: Config) -> None:
                 if metrics.enabled:
                     metrics.emit("tick_error", error=type(exc).__name__,
                                  message=str(exc))
+
+        # Update the drawdown-breaker peak / trip with current equity.
+        # ``unrealised_pnl`` requires live prices, so we only feed
+        # equity to the breaker after every tick rather than mid-tick.
+        # ``MAX_DRAWDOWN_PCT <= 0`` makes update_equity a no-op so
+        # zero cost when the feature is off.
+        try:
+            unrealised = portfolio.total_unrealised_pnl(client.get_price)
+            risk_mgr.update_equity(portfolio.realised_pnl + unrealised)
+        except Exception:
+            logger.debug("update_equity failed", exc_info=True)
 
         tick_count += 1
         # Export bot state for dashboard every tick
