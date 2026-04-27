@@ -87,6 +87,7 @@ def _observe_position_price(
     cfg: Config,
     token_id: str,
     current_price: float | None,
+    store: SQLiteStore | None = None,
 ) -> tuple[bool, float | None]:
     """Update price-observation tracking and detect zombies.
 
@@ -100,12 +101,43 @@ def _observe_position_price(
     Without this hook, a position whose price feed has gone silent
     silently bypasses every SL/TP check on every tick — capital
     trapped indefinitely.
+
+    When ``store`` is supplied, the latest observation/miss is also
+    persisted to ``position_price_state`` so a restart picks up the
+    counter where it left off.  Without this, a token already 4 ticks
+    dark would silently reset to zero on restart and need
+    ``ZOMBIE_POSITION_MAX_MISSING_TICKS`` more before the breaker
+    fires — exactly the wrong direction for a safety gate.
     """
     if current_price is not None and current_price > 0:
         portfolio.record_price_observation(token_id, current_price)
+        if store is not None:
+            pos = portfolio.positions.get(token_id)
+            if pos is not None:
+                try:
+                    store.upsert_position_price_state(
+                        token_id,
+                        last_known_price=pos.last_known_price,
+                        last_price_ts=pos.last_price_ts,
+                        consecutive_missing_price_ticks=pos.consecutive_missing_price_ticks,
+                    )
+                except Exception:
+                    logger.debug("Persist position_price_state failed", exc_info=True)
         return (False, None)
     threshold = int(getattr(cfg, "zombie_position_max_missing_ticks", 0) or 0)
     misses = portfolio.record_missing_price(token_id)
+    if store is not None:
+        pos = portfolio.positions.get(token_id)
+        if pos is not None:
+            try:
+                store.upsert_position_price_state(
+                    token_id,
+                    last_known_price=pos.last_known_price,
+                    last_price_ts=pos.last_price_ts,
+                    consecutive_missing_price_ticks=pos.consecutive_missing_price_ticks,
+                )
+            except Exception:
+                logger.debug("Persist position_price_state failed", exc_info=True)
     if threshold <= 0 or misses < threshold:
         return (False, None)
     pos = portfolio.positions.get(token_id)
@@ -144,6 +176,32 @@ def run_loop(cfg: Config) -> None:
     if all_trades:
         reconstruct_stats = portfolio.reconstruct_from_trades(all_trades)
         logger.info("Restored %d open positions from trade history.", portfolio.open_position_count())
+
+    # Re-hydrate the per-position price-observation tracker from
+    # ``position_price_state`` so the zombie detector picks up where it
+    # left off across restarts.  Rows for tokens we no longer hold
+    # (because the trade-replay never reopened them) are pruned to
+    # keep the table from drifting.
+    try:
+        states = store.get_all_position_price_states()
+        held_tokens = set(portfolio.positions.keys())
+        for tok, st in states.items():
+            if tok not in held_tokens:
+                store.delete_position_price_state(tok)
+                continue
+            pos = portfolio.positions[tok]
+            pos.last_known_price = float(st.get("last_known_price") or 0.0)
+            pos.last_price_ts = st.get("last_price_ts") or ""
+            pos.consecutive_missing_price_ticks = int(
+                st.get("consecutive_missing_price_ticks") or 0,
+            )
+        if states:
+            logger.info(
+                "Hydrated price-observation state for %d position(s) from DB.",
+                sum(1 for t in states if t in held_tokens),
+            )
+    except Exception:
+        logger.exception("Could not hydrate position_price_state — continuing.")
 
     risk_mgr = RiskManager(cfg, portfolio)
     if reconstruct_stats:
@@ -832,6 +890,13 @@ def _close_position_and_record(
         pnl=pnl,
         return_pct=return_pct,
     )
+    # The position is closed — drop its persisted price-tracking row
+    # so a future re-entry on the same token starts with a clean slate
+    # rather than inheriting the previous round's miss counter.
+    try:
+        store.delete_position_price_state(token_id)
+    except Exception:
+        logger.debug("delete_position_price_state failed", exc_info=True)
     if risk_mgr.bayesian_calibrator is not None:
         try:
             risk_mgr.bayesian_calibrator.record_outcome(
@@ -858,7 +923,7 @@ def _check_exits_only(
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
         is_zombie, fallback_price = _observe_position_price(
-            portfolio, cfg, token_id, current_price,
+            portfolio, cfg, token_id, current_price, store=store,
         )
         if current_price is None:
             if is_zombie and fallback_price is not None:
@@ -1209,7 +1274,7 @@ def _tick(
     for token_id, pos in list(portfolio.positions.items()):
         current_price = client.get_price(token_id)
         is_zombie, fallback_price = _observe_position_price(
-            portfolio, cfg, token_id, current_price,
+            portfolio, cfg, token_id, current_price, store=store,
         )
         if current_price is None:
             if is_zombie and fallback_price is not None:

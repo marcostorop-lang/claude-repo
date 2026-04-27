@@ -210,6 +210,23 @@ class SQLiteStore:
                 features        TEXT DEFAULT '{}'
             )
         """)
+        # Survives restart for the per-position price-observation
+        # tracker that drives zombie-position detection.  Without
+        # persistence, ``last_known_price`` and ``consecutive_missing
+        # _price_ticks`` reset to zero on every restart — a token
+        # already 4 ticks dark would need ``ZOMBIE_POSITION_MAX_MISSING
+        # _TICKS`` more before the breaker fires after a crash, which
+        # is exactly the wrong direction.  PK is token_id so an
+        # ``upsert`` is a single ON CONFLICT.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS position_price_state (
+                token_id        TEXT PRIMARY KEY,
+                last_known_price REAL NOT NULL DEFAULT 0.0,
+                last_price_ts    TEXT NOT NULL DEFAULT '',
+                consecutive_missing_price_ticks INTEGER NOT NULL DEFAULT 0,
+                updated_at       TEXT NOT NULL
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -572,6 +589,65 @@ class SQLiteStore:
             tuple(params),
         )
         return [float(r[0]) for r in cur.fetchall()]
+
+    # -- Position price-observation state -------------------------------------
+    # Persists the per-position price tracker so a restart doesn't
+    # reset ``consecutive_missing_price_ticks`` and lose track of an
+    # already-zombie token.  Mirrors the in-memory fields on
+    # ``Position``.  Always writes the current UTC timestamp on
+    # every upsert so an external operator can spot stale rows.
+
+    def upsert_position_price_state(
+        self,
+        token_id: str,
+        *,
+        last_known_price: float,
+        last_price_ts: str,
+        consecutive_missing_price_ticks: int,
+    ) -> None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO position_price_state "
+            "(token_id, last_known_price, last_price_ts, consecutive_missing_price_ticks, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(token_id) DO UPDATE SET "
+            "  last_known_price=excluded.last_known_price, "
+            "  last_price_ts=excluded.last_price_ts, "
+            "  consecutive_missing_price_ticks=excluded.consecutive_missing_price_ticks, "
+            "  updated_at=excluded.updated_at",
+            (token_id, float(last_known_price), last_price_ts,
+             int(consecutive_missing_price_ticks), now),
+        )
+        self._conn.commit()
+
+    def get_position_price_state(self, token_id: str) -> dict | None:
+        cur = self._conn.execute(
+            "SELECT token_id, last_known_price, last_price_ts, "
+            "       consecutive_missing_price_ticks, updated_at "
+            "FROM position_price_state WHERE token_id = ?",
+            (token_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_all_position_price_states(self) -> dict[str, dict]:
+        """Return a token_id → state dict mapping for fast hydration on startup."""
+        cur = self._conn.execute(
+            "SELECT token_id, last_known_price, last_price_ts, "
+            "       consecutive_missing_price_ticks, updated_at "
+            "FROM position_price_state"
+        )
+        return {row["token_id"]: dict(row) for row in cur.fetchall()}
+
+    def delete_position_price_state(self, token_id: str) -> None:
+        """Drop the row for a closed position so a future re-entry on
+        the same token starts with a clean slate."""
+        self._conn.execute(
+            "DELETE FROM position_price_state WHERE token_id = ?",
+            (token_id,),
+        )
+        self._conn.commit()
 
     def get_equity_curve(
         self,
