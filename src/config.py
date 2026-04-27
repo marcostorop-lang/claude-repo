@@ -680,6 +680,19 @@ class Config:
         default_factory=lambda: _env_int("LATENCY_WINDOW_SAMPLES", 500)
     )
 
+    # -- A/B shadow strategy (opt-in) ------------------------------------------
+    # When set to a strategy name (e.g. ``edge_based``) different from
+    # ``STRATEGY``, the bot evaluates that second strategy in parallel
+    # on every tick.  The shadow has its own in-memory PortfolioTracker
+    # and writes to ``shadow_decision_log`` + ``shadow_calibration``
+    # tables — it never places orders, never touches the real
+    # portfolio, and never affects PnL.  Lets an operator A/B-test a
+    # candidate strategy on real market data without spinning up a
+    # second bot instance.  Empty string (default) disables.
+    shadow_strategy: str = field(
+        default_factory=lambda: _env("SHADOW_STRATEGY", "")
+    )
+
     # -- Live risk-metrics tail window ----------------------------------------
     # Number of most-recent closed trades fed into the rolling Sharpe /
     # Sortino / max-drawdown summary surfaced in ``bot_state.json`` and

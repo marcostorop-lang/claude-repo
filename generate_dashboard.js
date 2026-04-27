@@ -542,6 +542,36 @@ ${botState && botState.risk_metrics && botState.risk_metrics.n > 0 ? `
 </div>
 ` : ''}
 
+${botState && botState.shadow && botState.shadow.enabled ? (() => {
+  const sh = botState.shadow;
+  const shrm = sh.risk_metrics || {n: 0};
+  const liveSharpe = (botState.risk_metrics && botState.risk_metrics.sharpe_annualized) || 0;
+  const livePnl = (botState.portfolio && botState.portfolio.net_pnl_after_fees) || 0;
+  const shadowNet = sh.realised_pnl + sh.unrealised_pnl - sh.fees_paid;
+  const sharpeDiff = shrm.sharpe_annualized - liveSharpe;
+  const pnlDiff = shadowNet - livePnl;
+  return `
+<div class="divider"></div>
+<div class="section" id="ab-shadow">
+  <h2>A/B shadow: ${sh.strategy} <span style="font-size:12px;color:#9ca3af">vs live ${botState.strategy}</span></h2>
+  <div class="grid4">
+    <div class="card"><div class="stat-val white">${shrm.n || 0}</div><div class="stat-label">Shadow closed trades</div></div>
+    <div class="card"><div class="stat-val ${shadowNet >= 0 ? 'green' : 'red'}">$${shadowNet.toFixed(2)}</div><div class="stat-label">Shadow net PnL</div></div>
+    <div class="card"><div class="stat-val ${shrm.sharpe_annualized >= 0 ? 'green' : 'red'}">${(shrm.sharpe_annualized || 0).toFixed(2)}</div><div class="stat-label">Shadow Sharpe</div></div>
+    <div class="card"><div class="stat-val ${(shrm.psr_vs_zero || 0) >= 0.95 ? 'green' : 'white'}">${((shrm.psr_vs_zero || 0) * 100).toFixed(1)}%</div><div class="stat-label">Shadow PSR vs 0</div></div>
+  </div>
+  <div class="grid4" style="margin-top:8px">
+    <div class="card"><div class="stat-val ${pnlDiff >= 0 ? 'green' : 'red'}">${pnlDiff >= 0 ? '+' : ''}$${pnlDiff.toFixed(2)}</div><div class="stat-label">Shadow &minus; Live PnL</div></div>
+    <div class="card"><div class="stat-val ${sharpeDiff >= 0 ? 'green' : 'red'}">${sharpeDiff >= 0 ? '+' : ''}${sharpeDiff.toFixed(2)}</div><div class="stat-label">Shadow &minus; Live Sharpe</div></div>
+    <div class="card"><div class="stat-val white">${sh.open_positions}</div><div class="stat-label">Shadow open positions</div></div>
+    <div class="card"><div class="stat-val white">${(sh.win_rate && sh.win_rate.total_closed) ? (sh.win_rate.win_rate * 100).toFixed(1) + '%' : '0%'}</div><div class="stat-label">Shadow win rate</div></div>
+  </div>
+  <div style="margin-top:8px;font-size:11px;color:#9ca3af">
+    Shadow runs in parallel on the same market data and never places orders. Run <code>shadow-report</code> for a full head-to-head and <code>validate-strategy</code> before promoting it to live.
+  </div>
+</div>`;
+})() : ''}
+
 <div class="divider"></div>
 
 <div class="section" id="performance">

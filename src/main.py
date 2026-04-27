@@ -342,6 +342,34 @@ def run_loop(cfg: Config) -> None:
         except Exception:
             logger.exception("Latency tracker setup failed — running without.")
 
+    # Shadow A/B strategy.  Empty string disables; a strategy name
+    # different from the live one builds a parallel evaluator that
+    # writes to the ``shadow_*`` tables without touching live PnL.
+    shadow_runner = None
+    shadow_name = (getattr(cfg, "shadow_strategy", "") or "").strip()
+    if shadow_name and shadow_name != strategy.name:
+        try:
+            from src.strategy.shadow_runner import ShadowRunner
+            # Build the shadow strategy via a temporary cfg override —
+            # leaves the live cfg untouched.
+            os.environ["STRATEGY"] = shadow_name
+            shadow_cfg = Config()
+            shadow_strat = _build_strategy(shadow_cfg, store=store)
+            os.environ["STRATEGY"] = strategy.name
+            shadow_runner = ShadowRunner(cfg, shadow_strat)
+            logger.info(
+                "A/B shadow runner enabled: strategy=%s (writing to shadow_* tables).",
+                shadow_strat.name,
+            )
+        except Exception:
+            logger.exception("Shadow runner setup failed — running without.")
+            shadow_runner = None
+    elif shadow_name and shadow_name == strategy.name:
+        logger.warning(
+            "SHADOW_STRATEGY=%s matches live STRATEGY — no A/B contrast, skipping.",
+            shadow_name,
+        )
+
     mode_label = "PAPER" if cfg.is_paper else ("LIVE" if cfg.is_live else "PAPER (live not enabled)")
     logger.info("=== Bot started | mode=%s | strategy=%s | poll=%ds ===", mode_label, strategy.name, cfg.poll_interval)
     if alerts is not None and alerts.sinks:
@@ -672,6 +700,7 @@ def run_loop(cfg: Config) -> None:
                     market_svc, strategy, risk_mgr, executor, portfolio,
                     store, client, cfg, semantic_smoother=semantic_smoother,
                     metrics=metrics, latency_tracker=latency_tracker,
+                    shadow_runner=shadow_runner,
                 )
             except Exception as exc:
                 logger.exception("Error in bot tick — will retry next cycle.")
@@ -685,7 +714,7 @@ def run_loop(cfg: Config) -> None:
 
         tick_count += 1
         # Export bot state for dashboard every tick
-        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client, store)
+        _export_bot_state(cfg, portfolio, risk_mgr, strategy, tick_count, client, store, shadow_runner=shadow_runner)
 
         logger.debug("Sleeping %d s …", cfg.poll_interval)
         for _ in range(cfg.poll_interval):
@@ -849,6 +878,66 @@ def _check_exits_only(
         )
 
 
+def _build_shadow_state_block(
+    shadow_runner,
+    store,
+    client: PolymarketClient,
+    cfg: Config,
+) -> dict:
+    """Compose the ``shadow`` block for ``bot_state.json``.
+
+    Always returns a well-formed dict (never None) so the dashboard
+    can render the section unconditionally and just check ``enabled``.
+    """
+    block = {
+        "enabled": False,
+        "strategy": "",
+        "open_positions": 0,
+        "realised_pnl": 0.0,
+        "unrealised_pnl": 0.0,
+        "fees_paid": 0.0,
+        "win_rate": {"wins": 0, "losses": 0, "breakeven": 0,
+                     "total_closed": 0, "win_rate": 0.0},
+        "risk_metrics": {"n": 0, "sharpe_annualized": 0.0,
+                         "sortino_annualized": 0.0, "max_drawdown": 0.0,
+                         "calmar": 0.0, "psr_vs_zero": 0.0,
+                         "tail_window": 0},
+    }
+    if shadow_runner is None or store is None:
+        return block
+    try:
+        st = shadow_runner.state(client.get_price)
+        block.update({
+            "enabled": st.enabled,
+            "strategy": st.strategy,
+            "open_positions": st.open_positions,
+            "realised_pnl": round(st.realised_pnl, 4),
+            "unrealised_pnl": round(st.unrealised_pnl, 4),
+            "fees_paid": round(st.fees_paid, 4),
+        })
+        block["win_rate"] = store.compute_shadow_win_rate()
+        from src.analysis.risk_metrics import (
+            probabilistic_sharpe_ratio, returns_summary,
+        )
+        tail = int(getattr(cfg, "risk_metrics_tail_window", 200) or 0)
+        rets = store.get_shadow_closed_returns(limit=tail if tail > 0 else None)
+        if rets:
+            rs = returns_summary(rets, periods_per_year=252)
+            psr = probabilistic_sharpe_ratio(rets, periods_per_year=252)
+            block["risk_metrics"] = {
+                "n": rs.n,
+                "sharpe_annualized": round(rs.sharpe_annualized, 4),
+                "sortino_annualized": round(rs.sortino_annualized, 4),
+                "max_drawdown": round(rs.max_drawdown, 4),
+                "calmar": round(rs.calmar, 4),
+                "psr_vs_zero": round(psr, 4),
+                "tail_window": tail,
+            }
+    except Exception:
+        logger.debug("Shadow state block failed", exc_info=True)
+    return block
+
+
 def _export_bot_state(
     cfg: Config,
     portfolio: PortfolioTracker,
@@ -857,6 +946,7 @@ def _export_bot_state(
     tick_count: int,
     client: PolymarketClient,
     store: SQLiteStore | None = None,
+    shadow_runner=None,
 ) -> None:
     """Write a JSON file with current bot state for the dashboard to consume.
 
@@ -960,6 +1050,7 @@ def _export_bot_state(
             },
             "win_rate": win_stats,
             "risk_metrics": risk_block,
+            "shadow": _build_shadow_state_block(shadow_runner, store, client, cfg),
             "config": {
                 "max_position_size": cfg.max_position_size,
                 "max_total_exposure": cfg.max_total_exposure,
@@ -1004,11 +1095,22 @@ def _tick(
     semantic_smoother=None,
     metrics=None,
     latency_tracker=None,
+    shadow_runner=None,
 ) -> None:
     """One iteration of the bot loop."""
 
     tick_start = utc_timestamp()
     tick_ts = iso_now()
+
+    # Shadow runner — opt-in second strategy that observes the same
+    # market data on every tick and persists its decisions to the
+    # ``shadow_*`` tables.  Exits run before live so a slow-shadow bug
+    # can never delay a live SL/TP.
+    if shadow_runner is not None:
+        try:
+            shadow_runner.evaluate_exits(store, client.get_price)
+        except Exception:
+            logger.debug("Shadow exits crashed — continuing.", exc_info=True)
 
     # 1. Check stop-loss / take-profit / edge-flip on existing positions.
     # Build the list first, close in a second pass — keeps the close
@@ -1067,6 +1169,19 @@ def _tick(
     # 2. Fetch market snapshots
     snapshots = market_svc.fetch_and_filter()
     logger.info("Evaluating %d market snapshots.", len(snapshots))
+
+    # 2a. Shadow runner entries.  Runs *after* fetch so it sees the
+    # exact same filtered universe the live strategy will see, but
+    # before any live execution so a long shadow pass can never
+    # delay an order placement (it can't — shadow never places one).
+    if shadow_runner is not None:
+        try:
+            shadow_runner.evaluate_entries(
+                snapshots, store,
+                price_history_loader=lambda tid: store.get_price_history(tid, limit=50),
+            )
+        except Exception:
+            logger.debug("Shadow entries crashed — continuing.", exc_info=True)
 
     # 2b. Opt-in negative-risk arb scan.  READ-ONLY observer — never
     # trades.  Runs after filtering so it sees the same markets the bot
@@ -1897,6 +2012,78 @@ def cmd_validate_strategy(
         store.close()
         raise SystemExit(1)
     store.close()
+
+
+@cli.command("shadow-report")
+@click.option("--tail", default=200, help="Most-recent N closed trades on each side.")
+def cmd_shadow_report(tail: int):
+    """Compare live vs shadow A/B PnL and risk-adjusted metrics.
+
+    Reads the live ``calibration`` and ``shadow_calibration`` tables
+    side by side and prints a head-to-head summary: trade count,
+    realised PnL, win rate, annualized Sharpe, max drawdown, and PSR
+    vs zero.  Read-only: never mutates state.
+
+    Useful while running with ``SHADOW_STRATEGY=<candidate>`` to see
+    on real market data whether the candidate would have outperformed
+    the live strategy *before* swapping them.  Pair with
+    ``validate-strategy`` once the shadow has accumulated enough
+    closed trades to clear the n-floor.
+    """
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    try:
+        from src.analysis.risk_metrics import (
+            probabilistic_sharpe_ratio, returns_summary,
+        )
+
+        def _summarise(returns: list[float]) -> dict:
+            rs = returns_summary(returns, periods_per_year=252)
+            psr = probabilistic_sharpe_ratio(returns, periods_per_year=252) if returns else 0.0
+            return {
+                "n": rs.n,
+                "sharpe": rs.sharpe_annualized,
+                "sortino": rs.sortino_annualized,
+                "max_dd": rs.max_drawdown,
+                "psr": psr,
+                "total_return": sum(returns),
+                "mean_return": rs.mean,
+            }
+
+        live_returns = store.get_closed_trade_returns(limit=tail)
+        shadow_returns = store.get_shadow_closed_returns(limit=tail)
+        live_wr = store.compute_win_rate()
+        shadow_wr = store.compute_shadow_win_rate()
+        live = _summarise(live_returns)
+        shadow = _summarise(shadow_returns)
+
+        rows = [
+            ("Closed trades (n)", f"{live['n']}", f"{shadow['n']}"),
+            ("Win rate", f"{live_wr['win_rate'] * 100:.1f}% ({live_wr['wins']}/{live_wr['wins']+live_wr['losses']})",
+             f"{shadow_wr['win_rate'] * 100:.1f}% ({shadow_wr['wins']}/{shadow_wr['wins']+shadow_wr['losses']})"),
+            ("Sum of returns", f"{live['total_return']:+.4f}", f"{shadow['total_return']:+.4f}"),
+            ("Mean return", f"{live['mean_return']:+.5f}", f"{shadow['mean_return']:+.5f}"),
+            ("Sharpe (annual.)", f"{live['sharpe']:+.3f}", f"{shadow['sharpe']:+.3f}"),
+            ("Sortino (annual.)", f"{live['sortino']:+.3f}", f"{shadow['sortino']:+.3f}"),
+            ("Max drawdown", f"{live['max_dd']:.4f}", f"{shadow['max_dd']:.4f}"),
+            ("PSR vs SR=0", f"{live['psr']:.3f}", f"{shadow['psr']:.3f}"),
+        ]
+        click.echo("")
+        click.echo(tabulate(rows, headers=["Metric", "Live", "Shadow"], tablefmt="github"))
+        click.echo("")
+        if shadow['n'] == 0:
+            click.echo("No shadow trades yet — set SHADOW_STRATEGY=<name> and let the bot run.")
+        elif shadow['n'] < 30:
+            click.echo(f"Shadow n={shadow['n']} — too few trades for reliable inference. Need >= 30; promote-to-live via validate-strategy needs >= 200.")
+        elif shadow['sharpe'] > live['sharpe'] and shadow['psr'] >= 0.95:
+            click.echo("Shadow shows higher Sharpe AND PSR>=0.95 vs zero — consider running validate-strategy on the shadow.")
+        elif shadow['sharpe'] <= live['sharpe']:
+            click.echo("Shadow does NOT outperform live — keep observing or rotate the candidate.")
+        else:
+            click.echo("Shadow shows higher Sharpe but PSR<0.95 — sample size or noise; keep observing.")
+    finally:
+        store.close()
 
 
 @cli.command("calibration-report")

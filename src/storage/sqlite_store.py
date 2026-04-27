@@ -172,6 +172,44 @@ class SQLiteStore:
                 updated_at  TEXT NOT NULL
             )
         """)
+        # ``shadow_decision_log`` and ``shadow_calibration`` are exact
+        # mirrors of ``decision_log`` and ``calibration`` used by the
+        # opt-in A/B shadow runner (see ``src/strategy/shadow_runner.py``).
+        # Kept in separate tables on purpose so a join query is the
+        # only way to mix shadow and live decisions — accidentally
+        # treating shadow rows as live PnL is not possible.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_decision_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT NOT NULL,
+                token_id        TEXT NOT NULL,
+                condition_id    TEXT NOT NULL,
+                action          TEXT NOT NULL,
+                reason          TEXT NOT NULL,
+                strategy        TEXT,
+                confidence      REAL,
+                price           REAL,
+                spread          REAL,
+                signal_detail   TEXT,
+                features        TEXT DEFAULT '{}'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS shadow_calibration (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_timestamp TEXT NOT NULL,
+                exit_timestamp  TEXT,
+                token_id        TEXT NOT NULL,
+                strategy        TEXT,
+                confidence      REAL NOT NULL,
+                entry_price     REAL NOT NULL,
+                exit_price      REAL,
+                exit_reason     TEXT,
+                pnl             REAL,
+                return_pct      REAL,
+                features        TEXT DEFAULT '{}'
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tick_stats (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,6 +257,10 @@ class SQLiteStore:
             "CREATE INDEX IF NOT EXISTS idx_resolutions_cond    ON market_resolutions(condition_id)",
             "CREATE INDEX IF NOT EXISTS idx_semantic_token_ts   ON semantic_signals(token_id, timestamp)",
             "CREATE INDEX IF NOT EXISTS idx_arb_ts              ON arb_opportunities(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_dec_ts       ON shadow_decision_log(timestamp)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_dec_action   ON shadow_decision_log(action)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_cal_token    ON shadow_calibration(token_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shadow_cal_exit_ts  ON shadow_calibration(exit_timestamp)",
         ]
         for stmt in statements:
             try:
@@ -434,6 +476,111 @@ class SQLiteStore:
             "ORDER BY id ASC"
         )
         return [float(r[0]) for r in cur.fetchall()]
+
+    # -- Shadow A/B mirrors ---------------------------------------------------
+    # Same shape as the live decision/calibration writers, but writing
+    # to the ``shadow_*`` tables.  Kept as separate methods (no shared
+    # helper with a ``table`` parameter) so an audit grep for "writes
+    # to ``calibration``" still finds the live path only.
+
+    def insert_shadow_decision(
+        self,
+        timestamp: str,
+        token_id: str,
+        condition_id: str,
+        action: str,
+        reason: str,
+        strategy: str = "",
+        confidence: float = 0.0,
+        price: float = 0.0,
+        spread: float = 0.0,
+        signal_detail: str = "",
+        features: dict | None = None,
+    ) -> None:
+        import json
+        features_json = json.dumps(features or {}, default=str)
+        self._conn.execute(
+            "INSERT INTO shadow_decision_log (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, features) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, token_id, condition_id, action, reason, strategy, confidence, price, spread, signal_detail, features_json),
+        )
+        self._conn.commit()
+
+    def insert_shadow_calibration_entry(
+        self,
+        entry_timestamp: str,
+        token_id: str,
+        strategy: str,
+        confidence: float,
+        entry_price: float,
+        features: dict | None = None,
+    ) -> int:
+        import json
+        features_json = json.dumps(features or {}, default=str)
+        cur = self._conn.execute(
+            "INSERT INTO shadow_calibration (entry_timestamp, token_id, strategy, confidence, entry_price, features) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (entry_timestamp, token_id, strategy, confidence, entry_price, features_json),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def update_shadow_calibration_exit(
+        self,
+        token_id: str,
+        exit_timestamp: str,
+        exit_price: float,
+        exit_reason: str,
+        pnl: float,
+        return_pct: float,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE shadow_calibration SET exit_timestamp=?, exit_price=?, exit_reason=?, pnl=?, return_pct=? "
+            "WHERE id = (SELECT id FROM shadow_calibration WHERE token_id=? AND exit_timestamp IS NULL ORDER BY id DESC LIMIT 1)",
+            (exit_timestamp, exit_price, exit_reason, pnl, return_pct, token_id),
+        )
+        self._conn.commit()
+
+    def get_shadow_closed_returns(self, *, limit: int | None = None) -> list[float]:
+        if limit is not None and limit > 0:
+            cur = self._conn.execute(
+                "SELECT return_pct FROM shadow_calibration "
+                "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+            rows = [float(r[0]) for r in cur.fetchall()]
+            rows.reverse()
+            return rows
+        cur = self._conn.execute(
+            "SELECT return_pct FROM shadow_calibration "
+            "WHERE exit_timestamp IS NOT NULL AND return_pct IS NOT NULL "
+            "ORDER BY id ASC"
+        )
+        return [float(r[0]) for r in cur.fetchall()]
+
+    def compute_shadow_win_rate(self) -> dict:
+        """Same contract as :meth:`compute_win_rate` but over shadow exits."""
+        cur = self._conn.execute(
+            "SELECT pnl FROM shadow_calibration WHERE exit_timestamp IS NOT NULL"
+        )
+        wins = losses = breakeven = 0
+        for (pnl,) in cur.fetchall():
+            if pnl is None:
+                continue
+            if pnl > 0:
+                wins += 1
+            elif pnl < 0:
+                losses += 1
+            else:
+                breakeven += 1
+        decisive = wins + losses
+        win_rate = (wins / decisive) if decisive > 0 else 0.0
+        return {
+            "wins": wins, "losses": losses, "breakeven": breakeven,
+            "total_closed": wins + losses + breakeven,
+            "win_rate": round(win_rate, 4),
+        }
 
     def compute_win_rate(self) -> dict:
         """Aggregate realised win/loss stats from the calibration table.
