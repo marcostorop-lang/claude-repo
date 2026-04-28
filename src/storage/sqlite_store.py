@@ -237,6 +237,24 @@ class SQLiteStore:
         # legs serialised as JSON for full forensic detail).  Live
         # accounting uses ``trades`` like all other fills; this table
         # is the audit trail an arb-specific report joins against.
+        # Retrieval index for the retrieval-augmented Claude prompt
+        # (see ``src/analysis/question_embeddings.py``).  Stores raw
+        # little-endian float32 vectors keyed by ``condition_id``;
+        # the dimension is recorded per row so an operator can roll
+        # forward to a higher-dim embedder without dropping the
+        # table.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS question_embeddings (
+                condition_id    TEXT PRIMARY KEY,
+                question        TEXT NOT NULL,
+                outcome         TEXT NOT NULL,
+                resolved_price  REAL NOT NULL,
+                resolved_at     TEXT NOT NULL,
+                dim             INTEGER NOT NULL,
+                embedding       BLOB NOT NULL,
+                updated_at      TEXT NOT NULL
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS arb_executions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -683,6 +701,44 @@ class SQLiteStore:
             (token_id,),
         )
         self._conn.commit()
+
+    # -- Question-embedding retrieval index -----------------------------------
+
+    def upsert_question_embedding(
+        self,
+        *,
+        condition_id: str,
+        question: str,
+        outcome: str,
+        resolved_price: float,
+        resolved_at: str,
+        dim: int,
+        embedding: bytes,
+    ) -> None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        self._conn.execute(
+            "INSERT INTO question_embeddings "
+            "(condition_id, question, outcome, resolved_price, resolved_at, "
+            " dim, embedding, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(condition_id) DO UPDATE SET "
+            "  question=excluded.question, outcome=excluded.outcome, "
+            "  resolved_price=excluded.resolved_price, "
+            "  resolved_at=excluded.resolved_at, dim=excluded.dim, "
+            "  embedding=excluded.embedding, updated_at=excluded.updated_at",
+            (condition_id, question, outcome, float(resolved_price),
+             resolved_at, int(dim), embedding, now),
+        )
+        self._conn.commit()
+
+    def get_question_embeddings(self) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT condition_id, question, outcome, resolved_price, "
+            "       resolved_at, dim, embedding "
+            "FROM question_embeddings"
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     # -- Arb execution audit trail --------------------------------------------
 

@@ -2065,6 +2065,29 @@ def cmd_run_bot():
     run_loop(cfg)
 
 
+@cli.command("backfill-embeddings")
+def cmd_backfill_embeddings():
+    """One-shot index of resolved markets for retrieval-augmented Claude.
+
+    Reads ``market_resolutions`` and writes vectors to
+    ``question_embeddings``.  Idempotent: re-running upserts existing
+    rows with fresh vectors.  Useful after swapping the embedder
+    model or after a long run accumulates new resolutions.
+
+    Read-only against the rest of the bot — never places orders.
+    """
+    cfg = Config()
+    setup_logging(cfg.log_level)
+    store = SQLiteStore(cfg.sqlite_db_path)
+    try:
+        from src.analysis.question_embeddings import QuestionEmbeddingStore
+        qs = QuestionEmbeddingStore(store)
+        n = qs.backfill_from_resolutions()
+        click.echo(f"Indexed {n} resolved market(s) into question_embeddings.")
+    finally:
+        store.close()
+
+
 @cli.command("backfill-markets")
 def cmd_backfill():
     """Download active markets and cache them locally.
