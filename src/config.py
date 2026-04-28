@@ -553,6 +553,33 @@ class Config:
     # accrue, the multiplier is 1.0 (no effect).  Enabling only
     # ``BAYESIAN_CALIBRATION_ENABLED`` runs the tracker silently so
     # the operator can accumulate evidence before toggling sizing on.
+    # -- Brier-calibrated sizing multiplier (opt-in) --------------------------
+    # Lifts the sizing floor of every strategy without retuning: bad
+    # calibration → multiplier < 1 (smaller trades); good calibration
+    # → multiplier > 1 (up to BRIER_MAX_MULTIPLIER).  Cold-start cells
+    # (n < BRIER_MIN_SAMPLES) return 1.0 so the gate never punishes a
+    # strategy with no track record.  Off by default until the
+    # operator has accumulated enough closed trades to make Brier
+    # estimates stable.
+    brier_calibration_enabled: bool = field(
+        default_factory=lambda: _env_bool("BRIER_CALIBRATION_ENABLED", False)
+    )
+    brier_min_samples: int = field(
+        default_factory=lambda: _env_int("BRIER_MIN_SAMPLES", 20)
+    )
+    brier_cache_seconds: float = field(
+        default_factory=lambda: _env_float("BRIER_CACHE_SECONDS", 60.0)
+    )
+    brier_slope: float = field(
+        default_factory=lambda: _env_float("BRIER_SLOPE", 4.0)
+    )
+    brier_min_multiplier: float = field(
+        default_factory=lambda: _env_float("BRIER_MIN_MULTIPLIER", 0.25)
+    )
+    brier_max_multiplier: float = field(
+        default_factory=lambda: _env_float("BRIER_MAX_MULTIPLIER", 1.5)
+    )
+
     bayesian_calibration_enabled: bool = field(
         default_factory=lambda: _env_bool("BAYESIAN_CALIBRATION_ENABLED", False)
     )

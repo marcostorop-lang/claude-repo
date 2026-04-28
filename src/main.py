@@ -232,6 +232,26 @@ def run_loop(cfg: Config) -> None:
     risk_mgr = RiskManager(cfg, portfolio)
     risk_mgr.store = store  # enables drawdown-state persistence
     risk_mgr.seed_drawdown_state()
+    if getattr(cfg, "brier_calibration_enabled", False):
+        try:
+            from src.analysis.brier_calibrator import BrierCalibrator
+            risk_mgr.brier_calibrator = BrierCalibrator(
+                store,
+                min_samples=cfg.brier_min_samples,
+                cache_seconds=cfg.brier_cache_seconds,
+                slope=cfg.brier_slope,
+                min_multiplier=cfg.brier_min_multiplier,
+                max_multiplier=cfg.brier_max_multiplier,
+            )
+            logger.info(
+                "Brier calibrator enabled (min_samples=%d, slope=%.2f, "
+                "mult_range=[%.2f, %.2f]).",
+                cfg.brier_min_samples, cfg.brier_slope,
+                cfg.brier_min_multiplier, cfg.brier_max_multiplier,
+            )
+        except Exception:
+            logger.exception("Brier calibrator setup failed — running without.")
+            risk_mgr.brier_calibrator = None
     if reconstruct_stats:
         pnl_today = float(reconstruct_stats.get("realised_pnl_today", 0.0) or 0.0)
         if pnl_today != 0.0:

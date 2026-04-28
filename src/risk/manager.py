@@ -79,6 +79,15 @@ class RiskManager:
         self._drawdown_breaker_tripped: bool = False
         self._drawdown_breaker_reason: str = ""
         self.store = None  # set by run_loop after construction
+        # Optional Brier-calibrated sizing multiplier.  When attached
+        # the risk manager scales ``base_usd`` by the calibrator's
+        # output for the (strategy, category) cell of the current
+        # signal.  ``None`` means feature off (back-compat).
+        self.brier_calibrator = None
+        # Last category passed into ``check`` — used by
+        # ``compute_position_size`` to look up the right Brier cell
+        # without changing the sizing function's signature.
+        self._last_check_category: str = ""
 
     # ------------------------------------------------------------------
     # Daily loss tracking
@@ -339,6 +348,26 @@ class RiskManager:
             # Legacy confidence-only scaling
             base_usd *= min(confidence, 1.0)
 
+        # Brier-calibrated sizing multiplier.  Lifts the floor of
+        # *every* strategy: bad calibration → smaller positions
+        # automatically, no manual retune required.  Cold-start cells
+        # (n < min_samples) return 1.0 — never punish a strategy with
+        # no track record.  Off when no calibrator is attached.
+        if self.brier_calibrator is not None and strategy:
+            try:
+                m = self.brier_calibrator.calibration_multiplier(
+                    strategy=strategy,
+                    category=getattr(self, "_last_check_category", "") or "",
+                )
+                if m and m > 0 and m != 1.0:
+                    base_usd *= m
+                    logger.debug(
+                        "Brier-calibrated multiplier for %s: %.3f → base=$%.2f",
+                        strategy, m, base_usd,
+                    )
+            except Exception:
+                logger.debug("Brier calibrator failed", exc_info=True)
+
         # Liquidity cap: never take more than X% of reported market liquidity
         if liquidity > 0 and self.cfg.max_liquidity_fraction > 0:
             max_usd_from_liq = liquidity * self.cfg.max_liquidity_fraction
@@ -437,6 +466,9 @@ class RiskManager:
         category: str = "",
     ) -> RiskVerdict:
         """Evaluate whether a trade should proceed and at what size."""
+
+        # Stash for compute_position_size — no signature change there.
+        self._last_check_category = category or ""
 
         # HOLD signals need no risk check
         if signal.action == Action.HOLD:
