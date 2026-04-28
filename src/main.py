@@ -2066,24 +2066,55 @@ def cmd_run_bot():
 
 
 @cli.command("backfill-embeddings")
-def cmd_backfill_embeddings():
+@click.option(
+    "--embedder",
+    default="hashed_bow",
+    help="Embedder backend: hashed_bow (default), sentence_transformer, voyage.",
+)
+@click.option(
+    "--model",
+    default="all-MiniLM-L6-v2",
+    help="Model name (only used by sentence_transformer / voyage).",
+)
+def cmd_backfill_embeddings(embedder: str, model: str):
     """One-shot index of resolved markets for retrieval-augmented Claude.
 
     Reads ``market_resolutions`` and writes vectors to
     ``question_embeddings``.  Idempotent: re-running upserts existing
-    rows with fresh vectors.  Useful after swapping the embedder
-    model or after a long run accumulates new resolutions.
+    rows with fresh vectors — handy after upgrading the embedder
+    backend.  Read-only against the rest of the bot.
 
-    Read-only against the rest of the bot — never places orders.
+    Embedder backends:
+      * ``hashed_bow`` — deterministic, no dependencies, weak quality.
+      * ``sentence_transformer`` — local model (default
+        ``all-MiniLM-L6-v2``); requires ``pip install sentence-transformers``.
+      * ``voyage`` — hosted Voyage AI; requires ``pip install voyageai``
+        and ``VOYAGE_API_KEY``.
     """
     cfg = Config()
     setup_logging(cfg.log_level)
     store = SQLiteStore(cfg.sqlite_db_path)
     try:
+        from src.analysis.embedders import build_embedder
         from src.analysis.question_embeddings import QuestionEmbeddingStore
-        qs = QuestionEmbeddingStore(store)
+        try:
+            emb, dim = build_embedder(
+                embedder,
+                sentence_transformer_model=model,
+                voyage_model=model,
+            )
+        except (ImportError, RuntimeError, ValueError) as exc:
+            click.echo(f"Embedder setup failed: {exc}", err=True)
+            raise SystemExit(1)
+        kwargs = {"dim": dim}
+        if emb is not None:
+            kwargs["embedder"] = emb
+        qs = QuestionEmbeddingStore(store, **kwargs)
         n = qs.backfill_from_resolutions()
-        click.echo(f"Indexed {n} resolved market(s) into question_embeddings.")
+        click.echo(
+            f"Indexed {n} resolved market(s) into question_embeddings "
+            f"using backend={embedder!r} dim={dim}.",
+        )
     finally:
         store.close()
 
