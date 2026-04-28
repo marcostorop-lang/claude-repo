@@ -246,6 +246,25 @@ def run_loop(cfg: Config) -> None:
     risk_mgr = RiskManager(cfg, portfolio)
     risk_mgr.store = store  # enables drawdown-state persistence
     risk_mgr.seed_drawdown_state()
+    # Optional adverse-selection filter.  Plug-in style: only attached
+    # when the operator opts in.  Reads the book via the same provider
+    # the OFI strategy uses.
+    if getattr(cfg, "adverse_selection_enabled", False):
+        try:
+            from src.risk.adverse_selection import AdverseSelectionFilter
+            risk_mgr.adverse_selection_filter = AdverseSelectionFilter(
+                book_provider=client.get_book_depth_dict,
+                ratio_threshold=cfg.adverse_selection_ratio_threshold,
+                absolute_floor_usd=cfg.adverse_selection_absolute_floor_usd,
+            )
+            logger.info(
+                "Adverse-selection filter enabled (ratio>=%.2f, floor=$%.0f).",
+                cfg.adverse_selection_ratio_threshold,
+                cfg.adverse_selection_absolute_floor_usd,
+            )
+        except Exception:
+            logger.exception("Adverse-selection filter setup failed.")
+
     if getattr(cfg, "brier_calibration_enabled", False):
         try:
             from src.analysis.brier_calibrator import BrierCalibrator

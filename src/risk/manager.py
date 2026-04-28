@@ -79,6 +79,10 @@ class RiskManager:
         self._drawdown_breaker_tripped: bool = False
         self._drawdown_breaker_reason: str = ""
         self.store = None  # set by run_loop after construction
+        # Optional adverse-selection filter.  When attached, BUYs into
+        # a thin-bid / wall-of-asks book are refused.  SELLs always
+        # pass.  ``None`` keeps behaviour unchanged.
+        self.adverse_selection_filter = None
         # Optional Brier-calibrated sizing multiplier.  When attached
         # the risk manager scales ``base_usd`` by the calibrator's
         # output for the (strategy, category) cell of the current
@@ -607,6 +611,16 @@ class RiskManager:
                 False, 0.0,
                 "Spread unknown — refusing BUY (set REQUIRE_KNOWN_SPREAD_FOR_BUY=false to override).",
             )
+
+        # --- Adverse-selection filter ---
+        # Block BUYs into a thin-bid / wall-of-asks book.  SELLs pass.
+        if self.adverse_selection_filter is not None and signal.action == Action.BUY:
+            try:
+                v = self.adverse_selection_filter.check(token_id, "BUY")
+                if v.blocked:
+                    return RiskVerdict(False, 0.0, v.reason)
+            except Exception:
+                logger.debug("Adverse-selection filter raised", exc_info=True)
 
         # --- Price boundary filter ---
         if signal.action == Action.BUY and price > 0:

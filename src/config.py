@@ -305,6 +305,21 @@ class Config:
     arb_min_discount: float = field(default_factory=lambda: _env_float("ARB_MIN_DISCOUNT", 0.01))
     arb_min_legs_liquidity: float = field(default_factory=lambda: _env_float("ARB_MIN_LEGS_LIQUIDITY", 100.0))
 
+    # -- Adverse-selection filter (opt-in) ------------------------------------
+    # Blocks BUYs whose contra-side depth dwarfs the same-side depth
+    # *and* the contra wall is non-trivial in absolute terms.  Both
+    # conditions must hold to filter false positives in thin markets.
+    # SELLs are never blocked (always allow exits).
+    adverse_selection_enabled: bool = field(
+        default_factory=lambda: _env_bool("ADVERSE_SELECTION_ENABLED", False)
+    )
+    adverse_selection_ratio_threshold: float = field(
+        default_factory=lambda: _env_float("ADVERSE_SELECTION_RATIO_THRESHOLD", 3.0)
+    )
+    adverse_selection_absolute_floor_usd: float = field(
+        default_factory=lambda: _env_float("ADVERSE_SELECTION_ABSOLUTE_FLOOR_USD", 500.0)
+    )
+
     # -- Negative-risk arb *executor* (opt-in, distinct from the detector) ----
     # Detector marks opportunities; executor places live orders.  Strict
     # opt-in via ``ARB_EXECUTOR_ENABLED=true``.  The executor honours
