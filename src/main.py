@@ -69,6 +69,9 @@ def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrate
     if cfg.strategy == "pairs_cointegration":
         from src.strategy.pairs_cointegration import PairsCointegrationStrategy
         return PairsCointegrationStrategy(cfg)
+    if cfg.strategy == "ensemble":
+        from src.strategy.brier_ensemble import BrierEnsembleStrategy
+        return BrierEnsembleStrategy(cfg)
     return SimpleMomentum(cfg)
 
 
@@ -254,6 +257,11 @@ def run_loop(cfg: Config) -> None:
                 min_multiplier=cfg.brier_min_multiplier,
                 max_multiplier=cfg.brier_max_multiplier,
             )
+            # Reuse the same calibrator instance for the ensemble vote
+            # weighting so members are scored by the same track-record
+            # the risk manager uses for sizing.
+            if getattr(strategy, "name", "") == "ensemble" and hasattr(strategy, "calibrator"):
+                strategy.calibrator = risk_mgr.brier_calibrator
             logger.info(
                 "Brier calibrator enabled (min_samples=%d, slope=%.2f, "
                 "mult_range=[%.2f, %.2f]).",
@@ -407,6 +415,12 @@ def run_loop(cfg: Config) -> None:
     # zero-cost for strategies that don't need it.
     if hasattr(strategy, "book_provider") and strategy.book_provider is None:
         strategy.book_provider = client.get_book_depth_dict
+    # When the ensemble strategy is the live one, propagate the book
+    # provider down into any member that needs it.
+    if hasattr(strategy, "members") and isinstance(strategy.members, list):
+        for member in strategy.members:
+            if hasattr(member, "book_provider") and member.book_provider is None:
+                member.book_provider = client.get_book_depth_dict
 
     # Optional cross-tick EMA smoother for the semantic engine's synthetic
     # fair-price.  Persistent across ticks so the moving average actually

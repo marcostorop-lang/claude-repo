@@ -178,6 +178,29 @@ class Config:
         default_factory=lambda: _env_float("PAIRS_MAX_ABS_RESIDUAL", 0.5)
     )
 
+    # -- Brier-weighted ensemble ---------------------------------------------
+    # CSV of member strategy names; the ensemble votes on every tick
+    # weighted by each member's Brier-calibrated track record.
+    ensemble_members: str = field(
+        default_factory=lambda: _env(
+            "ENSEMBLE_MEMBERS",
+            "simple_momentum,mean_reversion,edge_based",
+        )
+    )
+    # The ensemble HOLDs when total absolute weight (sum of Brier
+    # multipliers across non-HOLD voters) falls below this floor —
+    # one member with a tiny weight should not be allowed to drive
+    # an entry alone.
+    ensemble_min_total_weight: float = field(
+        default_factory=lambda: _env_float("ENSEMBLE_MIN_TOTAL_WEIGHT", 0.5)
+    )
+    # |net score| floor: weighted-sum / total-abs-weight.  Below this
+    # the ensemble HOLDs even when individual voters are confident
+    # — useful when voters disagree and produce near-zero net score.
+    ensemble_min_net_score: float = field(
+        default_factory=lambda: _env_float("ENSEMBLE_MIN_NET_SCORE", 0.20)
+    )
+
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))
