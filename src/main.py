@@ -66,6 +66,9 @@ def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrate
         # instance — it will simply HOLD until ``book_provider`` is
         # attached.
         return OrderFlowImbalanceStrategy(cfg)
+    if cfg.strategy == "pairs_cointegration":
+        from src.strategy.pairs_cointegration import PairsCointegrationStrategy
+        return PairsCointegrationStrategy(cfg)
     return SimpleMomentum(cfg)
 
 

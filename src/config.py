@@ -162,6 +162,22 @@ class Config:
         default_factory=lambda: _env_float("OFI_MIN_DEPTH_USD", 200.0)
     )
 
+    # -- Pairs cointegration -------------------------------------------------
+    # Trades temporal mispricings of ``sum(leg_prices) - 1.0`` on
+    # multi-outcome events.  See ``src/strategy/pairs_cointegration.py``.
+    pairs_window: int = field(
+        default_factory=lambda: _env_int("PAIRS_WINDOW", 30)
+    )
+    pairs_entry_z: float = field(
+        default_factory=lambda: _env_float("PAIRS_ENTRY_Z", 1.5)
+    )
+    pairs_min_legs: int = field(
+        default_factory=lambda: _env_int("PAIRS_MIN_LEGS", 2)
+    )
+    pairs_max_abs_residual: float = field(
+        default_factory=lambda: _env_float("PAIRS_MAX_ABS_RESIDUAL", 0.5)
+    )
+
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))
