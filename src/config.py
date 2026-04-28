@@ -149,6 +149,19 @@ class Config:
     # 5+ ticks of history per token before any signal could fire).
     momentum_window: int = field(default_factory=lambda: _env_int("MOMENTUM_WINDOW", 3))
     momentum_threshold: float = field(default_factory=lambda: _env_float("MOMENTUM_THRESHOLD", 0.02))
+    # -- Order-Flow Imbalance ------------------------------------------------
+    # Microstructure strategy: signals on *sustained* bid-vs-ask depth
+    # imbalance.  See ``src/strategy/order_flow_imbalance.py``.
+    ofi_window: int = field(
+        default_factory=lambda: _env_int("OFI_WINDOW", 5)
+    )
+    ofi_threshold: float = field(
+        default_factory=lambda: _env_float("OFI_THRESHOLD", 0.30)
+    )
+    ofi_min_depth_usd: float = field(
+        default_factory=lambda: _env_float("OFI_MIN_DEPTH_USD", 200.0)
+    )
+
     mean_reversion_window: int = field(default_factory=lambda: _env_int("MEAN_REVERSION_WINDOW", 10))
     mean_reversion_entry_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_ENTRY_Z", 1.5))
     mean_reversion_exit_z: float = field(default_factory=lambda: _env_float("MEAN_REVERSION_EXIT_Z", 0.5))

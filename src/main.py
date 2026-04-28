@@ -58,6 +58,14 @@ def _build_strategy(cfg: Config, store: SQLiteStore | None = None) -> BaseStrate
         return EdgeBasedStrategy(cfg, store=store)
     if cfg.strategy == "semantic_mispricing":
         return SemanticMispricingStrategy(cfg)
+    if cfg.strategy == "order_flow_imbalance":
+        from src.strategy.order_flow_imbalance import OrderFlowImbalanceStrategy
+        # The book provider is wired in run_loop after the client
+        # exists.  Built without one here so test paths that build
+        # the strategy via env-only ``Config`` still get a working
+        # instance — it will simply HOLD until ``book_provider`` is
+        # attached.
+        return OrderFlowImbalanceStrategy(cfg)
     return SimpleMomentum(cfg)
 
 
@@ -390,6 +398,12 @@ def run_loop(cfg: Config) -> None:
     executor = ExecutionEngine(client, cfg, store)
     market_svc = MarketDataService(client, cfg)
     strategy = _build_strategy(cfg, store=store)
+    # Wire the book provider for OFI / pairs / any future strategy
+    # that needs depth.  We attach it as ``book_provider`` on any
+    # strategy that exposes the attribute — duck-typed so this stays
+    # zero-cost for strategies that don't need it.
+    if hasattr(strategy, "book_provider") and strategy.book_provider is None:
+        strategy.book_provider = client.get_book_depth_dict
 
     # Optional cross-tick EMA smoother for the semantic engine's synthetic
     # fair-price.  Persistent across ticks so the moving average actually

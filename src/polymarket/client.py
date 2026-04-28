@@ -265,6 +265,34 @@ class PolymarketClient:
             logger.debug("Failed to parse order book for %s", token_id[:12], exc_info=True)
             return None
 
+    def get_book_depth_dict(
+        self, token_id: str, fill_size_usd: float = 50.0,
+    ) -> dict | None:
+        """Compact dict consumed by ``OrderFlowImbalanceStrategy``.
+
+        Returns ``{"bid_depth_usd": float, "ask_depth_usd": float,
+        "midpoint": float}`` derived from the 5%-of-midpoint depth on
+        each side (USD-converted by multiplying size × price level).
+        ``None`` on any failure so the strategy can fall through to
+        HOLD without special-casing exceptions.
+        """
+        try:
+            ba = self.get_book_analysis(token_id, fill_size_usd=fill_size_usd)
+            if ba is None:
+                return None
+            mid = ba.midpoint or ((ba.best_bid + ba.best_ask) / 2.0 if ba.best_bid and ba.best_ask else 0.0)
+            # ``bid_depth_5pct`` is in *shares*; convert to USD by
+            # weighting at the midpoint as a simple, stable proxy.
+            # (A precise per-level VWAP would be marginally better but
+            # the imbalance ratio is what matters and is ratio-invariant.)
+            return {
+                "bid_depth_usd": float(ba.bid_depth_5pct) * mid,
+                "ask_depth_usd": float(ba.ask_depth_5pct) * mid,
+                "midpoint": float(mid),
+            }
+        except Exception:
+            return None
+
     def get_book_analysis(self, token_id: str, fill_size_usd: float = 50.0):
         """Fetch the order book and return a full depth analysis.
 
