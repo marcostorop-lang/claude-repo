@@ -233,6 +233,28 @@ class SQLiteStore:
         # but kept generic so future pieces of risk state (rolling
         # variance estimators, regime-shift counters, etc.) can land
         # here without another schema change.
+        # Records every executed negative-risk arb (one row per arb,
+        # legs serialised as JSON for full forensic detail).  Live
+        # accounting uses ``trades`` like all other fills; this table
+        # is the audit trail an arb-specific report joins against.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS arb_executions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       TEXT NOT NULL,
+                condition_id    TEXT NOT NULL,
+                question        TEXT,
+                kind            TEXT NOT NULL,
+                expected_edge   REAL NOT NULL,
+                realised_cost   REAL NOT NULL,
+                realised_edge   REAL NOT NULL,
+                legs_attempted  INTEGER NOT NULL,
+                legs_filled     INTEGER NOT NULL,
+                legs_unwound    INTEGER NOT NULL,
+                status          TEXT NOT NULL,
+                reason          TEXT,
+                legs_json       TEXT
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS risk_state (
                 key         TEXT PRIMARY KEY,
@@ -661,6 +683,45 @@ class SQLiteStore:
             (token_id,),
         )
         self._conn.commit()
+
+    # -- Arb execution audit trail --------------------------------------------
+
+    def insert_arb_execution(
+        self,
+        *,
+        timestamp: str,
+        condition_id: str,
+        question: str,
+        kind: str,
+        expected_edge: float,
+        realised_cost: float,
+        realised_edge: float,
+        legs_attempted: int,
+        legs_filled: int,
+        legs_unwound: int,
+        status: str,
+        reason: str = "",
+        legs_json: str = "[]",
+    ) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO arb_executions "
+            "(timestamp, condition_id, question, kind, expected_edge, "
+            " realised_cost, realised_edge, legs_attempted, legs_filled, "
+            " legs_unwound, status, reason, legs_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, condition_id, question, kind, float(expected_edge),
+             float(realised_cost), float(realised_edge), int(legs_attempted),
+             int(legs_filled), int(legs_unwound), status, reason, legs_json),
+        )
+        self._conn.commit()
+        return int(cur.lastrowid)
+
+    def get_recent_arb_executions(self, limit: int = 50) -> list[dict]:
+        cur = self._conn.execute(
+            "SELECT * FROM arb_executions ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     # -- Generic risk-manager state (key/value) -------------------------------
 

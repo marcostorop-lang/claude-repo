@@ -465,6 +465,29 @@ def run_loop(cfg: Config) -> None:
             logger.exception("Shadow runners setup failed — running without.")
             shadow_runners = []
 
+    # Optional negative-risk arb executor.  Routes detector findings
+    # through the same ExecutionEngine + live-trading gates so paper
+    # is paper and live is live with the same guarantees.
+    arb_executor = None
+    if cfg.arb_executor_enabled and cfg.arb_detector_enabled:
+        try:
+            from src.strategy.neg_risk_arb_executor import NegRiskArbExecutor
+            arb_executor = NegRiskArbExecutor(cfg, executor, portfolio, store)
+            logger.info(
+                "Neg-risk arb executor enabled "
+                "(min_exec_discount=%.4f, max_concurrent=%d, max_capital=$%.0f).",
+                cfg.arb_min_executable_discount, cfg.arb_max_concurrent,
+                cfg.arb_max_capital_usd,
+            )
+        except Exception:
+            logger.exception("Arb executor setup failed — running without.")
+            arb_executor = None
+    elif cfg.arb_executor_enabled and not cfg.arb_detector_enabled:
+        logger.warning(
+            "ARB_EXECUTOR_ENABLED=true but ARB_DETECTOR_ENABLED=false — "
+            "executor needs the detector; skipping.",
+        )
+
     mode_label = "PAPER" if cfg.is_paper else ("LIVE" if cfg.is_live else "PAPER (live not enabled)")
     logger.info("=== Bot started | mode=%s | strategy=%s | poll=%ds ===", mode_label, strategy.name, cfg.poll_interval)
     if alerts is not None and alerts.sinks:
@@ -796,6 +819,7 @@ def run_loop(cfg: Config) -> None:
                     store, client, cfg, semantic_smoother=semantic_smoother,
                     metrics=metrics, latency_tracker=latency_tracker,
                     shadow_runners=shadow_runners,
+                    arb_executor=arb_executor,
                 )
             except Exception as exc:
                 logger.exception("Error in bot tick — will retry next cycle.")
@@ -1290,6 +1314,7 @@ def _tick(
     metrics=None,
     latency_tracker=None,
     shadow_runners=None,
+    arb_executor=None,
 ) -> None:
     """One iteration of the bot loop."""
 
@@ -1399,12 +1424,32 @@ def _tick(
     # would trade, but we don't gate anything on its findings.
     if getattr(cfg, "arb_detector_enabled", False):
         try:
-            from src.analysis.arb_detector import scan_and_record
+            from src.analysis.arb_detector import scan_and_record, find_negative_risk_arbs
             scan_and_record(
                 snapshots, store, tick_ts,
                 min_discount=cfg.arb_min_discount,
                 min_legs_liquidity=cfg.arb_min_legs_liquidity,
             )
+            # Optional: route detected arbs to the executor.  Strict
+            # opt-in (``ARB_EXECUTOR_ENABLED=true``).  Every attempt
+            # — including skips — gets persisted to ``arb_executions``
+            # so the operator can audit what the executor saw vs did.
+            if arb_executor is not None:
+                arbs = find_negative_risk_arbs(
+                    snapshots,
+                    min_discount=cfg.arb_min_discount,
+                    min_legs_liquidity=cfg.arb_min_legs_liquidity,
+                )
+                from src.strategy.neg_risk_arb_executor import record_arb_execution
+                for arb in arbs:
+                    res = arb_executor.consider(arb)
+                    record_arb_execution(store, arb, res)
+                    if res.succeeded:
+                        logger.info(
+                            "Neg-risk arb filled: cond=%s edge=%.4f cost=$%.2f legs=%d",
+                            arb.condition_id[:12], res.realised_edge,
+                            res.realised_cost, res.legs_filled,
+                        )
         except Exception:
             # Non-fatal: a broken detector must never break the tick loop.
             logger.exception("Arb detector crashed — skipping this tick.")

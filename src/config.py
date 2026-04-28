@@ -253,6 +253,36 @@ class Config:
     arb_min_discount: float = field(default_factory=lambda: _env_float("ARB_MIN_DISCOUNT", 0.01))
     arb_min_legs_liquidity: float = field(default_factory=lambda: _env_float("ARB_MIN_LEGS_LIQUIDITY", 100.0))
 
+    # -- Negative-risk arb *executor* (opt-in, distinct from the detector) ----
+    # Detector marks opportunities; executor places live orders.  Strict
+    # opt-in via ``ARB_EXECUTOR_ENABLED=true``.  The executor honours
+    # the live-trading three-gate exactly like any other order path —
+    # it can never accidentally cross from paper to live.
+    arb_executor_enabled: bool = field(
+        default_factory=lambda: _env_bool("ARB_EXECUTOR_ENABLED", False)
+    )
+    # Don't execute below this discount even if the detector flagged
+    # the opportunity — execution costs (slippage, fees, partial
+    # fills) erode small edges fast.  Always ``>= ARB_MIN_DISCOUNT``.
+    arb_min_executable_discount: float = field(
+        default_factory=lambda: _env_float("ARB_MIN_EXECUTABLE_DISCOUNT", 0.02)
+    )
+    # Per-leg cap on the actual fill price relative to the price the
+    # detector saw.  A 1% slip on a 2-bps edge is the difference
+    # between profit and loss; 1.5% is a realistic floor for thin books.
+    arb_max_leg_slippage_pct: float = field(
+        default_factory=lambda: _env_float("ARB_MAX_LEG_SLIPPAGE_PCT", 0.015)
+    )
+    arb_per_leg_max_usd: float = field(
+        default_factory=lambda: _env_float("ARB_PER_LEG_MAX_USD", 25.0)
+    )
+    arb_max_concurrent: int = field(
+        default_factory=lambda: _env_int("ARB_MAX_CONCURRENT", 3)
+    )
+    arb_max_capital_usd: float = field(
+        default_factory=lambda: _env_float("ARB_MAX_CAPITAL_USD", 200.0)
+    )
+
     # -- Execution-cost model (opt-in) -----------------------------------------
     # Hypothetical fee schedule in basis points of notional.  Both default
     # to 0 (Polymarket's current CLOB charges no fee), so enabling this is
