@@ -710,6 +710,27 @@ class Config:
         default_factory=lambda: _env("SHADOW_STRATEGIES", "")
     )
 
+    # -- WebSocket price feed (opt-in) ----------------------------------------
+    # When enabled, a background thread maintains a fresh
+    # ``token_id → mid price`` cache from the Polymarket WS feed.
+    # ``get_price`` prefers cache hits younger than ``WS_PRICE_MAX_AGE_S``
+    # and falls back to the HTTP midpoint otherwise — the HTTP path
+    # stays the safety net so a hung WS never silently feeds stale
+    # quotes into SL/TP.  Requires the ``websocket-client`` package
+    # at runtime (``pip install websocket-client``); without it the
+    # client is a no-op and behaviour is unchanged.
+    ws_price_feed_enabled: bool = field(
+        default_factory=lambda: _env_bool("WS_PRICE_FEED_ENABLED", False)
+    )
+    ws_price_max_age_s: float = field(
+        default_factory=lambda: _env_float("WS_PRICE_MAX_AGE_S", 10.0)
+    )
+    ws_url: str = field(
+        default_factory=lambda: _env(
+            "WS_URL", "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        )
+    )
+
     # -- Live risk-metrics tail window ----------------------------------------
     # Number of most-recent closed trades fed into the rolling Sharpe /
     # Sortino / max-drawdown summary surfaced in ``bot_state.json`` and

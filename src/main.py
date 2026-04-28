@@ -167,6 +167,32 @@ def run_loop(cfg: Config) -> None:
     store = SQLiteStore(cfg.sqlite_db_path)
     portfolio = PortfolioTracker()
 
+    # Optional WS price-feed.  When enabled and the underlying
+    # transport is available, a daemon thread maintains a fresh
+    # ``token_id → mid price`` cache that ``client.get_price`` will
+    # prefer over the HTTP midpoint call.  Disabled or missing
+    # transport collapses to the legacy polling path byte-for-byte.
+    ws_client = None
+    if cfg.ws_price_feed_enabled:
+        try:
+            from src.polymarket.ws_client import PolymarketWSClient
+            ws_client = PolymarketWSClient(url=cfg.ws_url)
+            if ws_client.available:
+                client.ws_client = ws_client
+                ws_client.start()
+                logger.info(
+                    "WS price feed enabled (max_age=%.1fs).", cfg.ws_price_max_age_s,
+                )
+            else:
+                logger.warning(
+                    "WS_PRICE_FEED_ENABLED=true but no WS transport available "
+                    "(install ``websocket-client``); falling back to HTTP polling.",
+                )
+                ws_client = None
+        except Exception:
+            logger.exception("WS client setup failed — falling back to HTTP.")
+            ws_client = None
+
     # Reconstruct portfolio from trade history so positions survive restarts.
     # Capture today's realised PnL so we can seed the risk manager below —
     # otherwise a restart after a crashed day would silently reset the
@@ -803,6 +829,11 @@ def run_loop(cfg: Config) -> None:
             time.sleep(1)
 
     logger.info("Bot stopped.")
+    if ws_client is not None:
+        try:
+            ws_client.stop()
+        except Exception:
+            logger.debug("WS stop failed", exc_info=True)
     client.close()
     store.close()
 
@@ -1337,6 +1368,15 @@ def _tick(
     # 2. Fetch market snapshots
     snapshots = market_svc.fetch_and_filter()
     logger.info("Evaluating %d market snapshots.", len(snapshots))
+
+    # Keep the WS subscription set in sync with the live universe so
+    # next tick's ``client.get_price`` calls hit the cache for tokens
+    # we'll evaluate again.  No-op when no WS client is attached.
+    if getattr(client, "ws_client", None) is not None:
+        try:
+            client.ws_client.subscribe([s.token_id for s in snapshots])
+        except Exception:
+            logger.debug("WS subscribe failed", exc_info=True)
 
     # 2a. Shadow runner entries.  Runs *after* fetch so each runner
     # sees the exact same filtered universe the live strategy will

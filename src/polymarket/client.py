@@ -29,6 +29,13 @@ class PolymarketClient:
         self.cfg = cfg
         self._http = httpx.Client(timeout=30, follow_redirects=True)
         self._clob = build_clob_client(cfg)
+        # Optional WS price cache (opt-in via WS_PRICE_FEED_ENABLED).
+        # When attached, ``get_price`` prefers a fresh WS quote over the
+        # HTTP midpoint call — collapses the per-token network round-trip
+        # to a memory read.  ``None`` keeps the legacy polling path
+        # byte-for-byte.
+        self.ws_client = None
+        self.ws_max_age_s: float = float(getattr(cfg, "ws_price_max_age_s", 10.0))
 
     # ------------------------------------------------------------------
     # Gamma API helpers (public, no auth)
@@ -190,7 +197,20 @@ class PolymarketClient:
         return None
 
     def get_price(self, token_id: str) -> float | None:
-        """Return the last/midpoint price for a token."""
+        """Return the last/midpoint price for a token.
+
+        When a WS client is attached and has a fresh entry for the
+        token (``ws_max_age_s`` window), it is preferred — saves an
+        HTTP round trip per scanned market.  Stale or missing cache
+        entries fall through to the HTTP midpoint, so a hung WS does
+        not silently feed the bot stale prices.
+        """
+        if self.ws_client is not None:
+            cached = self.ws_client.get_cached_price(
+                token_id, max_age_s=self.ws_max_age_s,
+            )
+            if cached is not None:
+                return cached
         return self.get_midpoint(token_id)
 
     def get_top_of_book(self, token_id: str) -> dict | None:
