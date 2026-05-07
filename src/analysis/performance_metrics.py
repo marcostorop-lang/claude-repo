@@ -18,8 +18,9 @@ crash on a fresh DB.
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 # Annualisation factor for per-trade metrics when holding period is unknown.
@@ -211,6 +212,143 @@ def build_trade_pnls_from_store(store) -> list[dict]:
                 "exit_price": float(t["price"]),
             })
     return closed
+
+
+# --------------------------------------------------------------------------
+# Bootstrap confidence intervals
+# --------------------------------------------------------------------------
+#
+# Point estimates of Sharpe and win-rate are easy to misread at small N:
+# a Sharpe of 1.0 over 20 trades is statistically indistinguishable from
+# zero.  These helpers expose non-parametric CIs (percentile bootstrap)
+# so the dashboard can render bands instead of bare numbers.
+#
+# Pure Python — same constraint as the rest of the analysis package.
+
+
+def _bootstrap_ci(
+    values: Sequence[float],
+    metric_fn: Callable[[Sequence[float]], float],
+    n_resamples: int = 1000,
+    alpha: float = 0.05,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """Generic percentile-bootstrap CI.
+
+    Returns ``(nan, nan)`` for fewer than two observations or when
+    ``n_resamples`` is zero.  Caller chooses ``metric_fn`` so this
+    function is reusable for Sharpe, win-rate, profit-factor, etc.
+    """
+    n = len(values)
+    if n < 2 or n_resamples <= 0:
+        return float("nan"), float("nan")
+    rng = random.Random(seed)
+    samples: list[float] = []
+    for _ in range(n_resamples):
+        resampled = [values[rng.randrange(n)] for _ in range(n)]
+        try:
+            samples.append(metric_fn(resampled))
+        except Exception:
+            # Metric undefined on this resample (e.g. all losses for
+            # profit-factor) — drop, don't fail the whole CI.
+            continue
+    if len(samples) < 2:
+        return float("nan"), float("nan")
+    samples.sort()
+    lo = samples[max(0, int(math.floor((alpha / 2) * len(samples))))]
+    hi = samples[min(len(samples) - 1, int(math.ceil((1 - alpha / 2) * len(samples))) - 1)]
+    return lo, hi
+
+
+def _sharpe_from_daily(daily: Sequence[float]) -> float:
+    """Annualised daily Sharpe (matches the in-line computation in
+    :func:`compute_performance`).  Returns 0 on degenerate input so the
+    bootstrap doesn't drop too many resamples."""
+    if len(daily) < 2:
+        return 0.0
+    mu = sum(daily) / len(daily)
+    sd = _std(daily)
+    if sd <= 0:
+        return 0.0
+    return (mu / sd) * math.sqrt(_TRADING_DAYS_PER_YEAR)
+
+
+def sharpe_ci(
+    daily_returns: Sequence[float],
+    n_resamples: int = 1000,
+    alpha: float = 0.05,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """95% bootstrap CI for the annualised daily Sharpe ratio.
+
+    Bootstraps the *daily* PnL series (not individual trades) so the
+    annualisation is consistent with ``compute_performance.sharpe_daily``.
+    """
+    return _bootstrap_ci(
+        list(daily_returns), _sharpe_from_daily,
+        n_resamples=n_resamples, alpha=alpha, seed=seed,
+    )
+
+
+def _win_rate(pnls: Sequence[float]) -> float:
+    if not pnls:
+        return 0.0
+    return sum(1 for p in pnls if p > 0) / len(pnls)
+
+
+def win_rate_ci(
+    trade_pnls: Sequence[float],
+    n_resamples: int = 1000,
+    alpha: float = 0.05,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """95% bootstrap CI for win-rate.
+
+    Equivalent to a Wilson interval for very large N but doesn't assume
+    normality — preferred at the small samples we typically see.
+    """
+    return _bootstrap_ci(
+        list(trade_pnls), _win_rate,
+        n_resamples=n_resamples, alpha=alpha, seed=seed,
+    )
+
+
+@dataclass(frozen=True)
+class PerformanceCI:
+    """Confidence intervals attached to a :class:`PerformanceReport`."""
+
+    n_resamples: int
+    alpha: float
+    sharpe_low: float
+    sharpe_high: float
+    win_rate_low: float
+    win_rate_high: float
+
+    def as_dict(self) -> dict:
+        return {k: getattr(self, k) for k in self.__dataclass_fields__}
+
+
+def compute_ci(
+    trades: Sequence[dict],
+    n_resamples: int = 1000,
+    alpha: float = 0.05,
+    seed: int | None = None,
+) -> PerformanceCI:
+    """Compute bootstrap CIs alongside the standard performance report.
+
+    Returns ``nan`` for both ends of any CI that is undefined (too few
+    samples).  Cheap when ``n_resamples`` is reasonable: a few thousand
+    1-D resamples take milliseconds even at N=10k trades.
+    """
+    pnls = [float(t.get("pnl", 0.0)) for t in trades]
+    daily = _compute_daily_returns(trades)
+    s_lo, s_hi = sharpe_ci(daily, n_resamples=n_resamples, alpha=alpha, seed=seed)
+    w_lo, w_hi = win_rate_ci(pnls, n_resamples=n_resamples, alpha=alpha, seed=seed)
+    return PerformanceCI(
+        n_resamples=n_resamples, alpha=alpha,
+        sharpe_low=s_lo, sharpe_high=s_hi,
+        win_rate_low=w_lo, win_rate_high=w_hi,
+    )
 
 
 def format_report_markdown(report: PerformanceReport) -> str:

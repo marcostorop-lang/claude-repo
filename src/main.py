@@ -283,6 +283,17 @@ def run_loop(cfg: Config) -> None:
         logger.exception("Alert manager setup failed — running without alerts.")
         alerts = None
 
+    # Systemic-failure monitor (API error-rate, DB integrity, heartbeat,
+    # auth refresh).  Wraps the AlertManager — when ``alerts`` is None
+    # we still construct an empty AlertManager so the bot loop can call
+    # the monitor unconditionally.
+    from src.utils.alerts import AlertManager
+    from src.utils.system_monitor import SystemMonitor
+    system_monitor = SystemMonitor(
+        manager=alerts if alerts is not None else AlertManager(),
+        heartbeat_max_silence_s=max(60.0, cfg.poll_interval * 5.0),
+    )
+
     # Structured JSON metrics writer — independent of the DB so external
     # pipelines can aggregate without schema coupling.  No-op when
     # ``METRICS_FILE`` is unset.
@@ -621,7 +632,11 @@ def run_loop(cfg: Config) -> None:
                     market_svc, strategy, risk_mgr, executor, portfolio,
                     store, client, cfg, semantic_smoother=semantic_smoother,
                     metrics=metrics, latency_tracker=latency_tracker,
+                    system_monitor=system_monitor,
                 )
+                # Successful tick → mark heartbeat so an external watchdog
+                # (or the next tick's check) can detect a stalled loop.
+                system_monitor.heartbeat()
             except Exception as exc:
                 logger.exception("Error in bot tick — will retry next cycle.")
                 if alerts is not None:
@@ -631,6 +646,11 @@ def run_loop(cfg: Config) -> None:
                 if metrics.enabled:
                     metrics.emit("tick_error", error=type(exc).__name__,
                                  message=str(exc))
+
+        # Cheap watchdog: every iteration, check whether the previous
+        # tick was too long ago.  Catches the case where _tick raises
+        # repeatedly and the loop is "alive" but functionally hung.
+        system_monitor.check_heartbeat()
 
         tick_count += 1
         # Export bot state for dashboard every tick
@@ -800,6 +820,133 @@ def _export_bot_state(
         logger.warning("Failed to export bot state JSON: %s", e, exc_info=True)
 
 
+def _collect_exit_candidates(
+    portfolio: PortfolioTracker,
+    risk_mgr: RiskManager,
+    client: PolymarketClient,
+    store: SQLiteStore,
+    cfg: Config,
+) -> list[tuple[str, str]]:
+    """Return positions whose SL/TP/edge-flip rules have triggered.
+
+    Pure-ish: reads ``portfolio``, ``store``, ``client`` but never mutates
+    them.  Returned list is consumed by the caller, which performs the
+    close.  Extracted from ``_tick`` so the loop body stays under ~250
+    lines and the trigger logic is unit-testable in isolation.
+    """
+    tokens_to_close: list[tuple[str, str]] = []
+    for token_id, pos in list(portfolio.positions.items()):
+        current_price = client.get_price(token_id)
+        if current_price is None:
+            logger.debug(
+                "No price for position %s — skipping SL/TP check.",
+                token_id[:12],
+            )
+            continue
+        if risk_mgr.check_stop_loss(pos.entry_price, current_price):
+            logger.info(
+                "Stop-loss triggered for %s (entry=%.4f, current=%.4f)",
+                token_id[:12], pos.entry_price, current_price,
+            )
+            tokens_to_close.append((token_id, "stop_loss"))
+            continue
+        if risk_mgr.check_take_profit(pos.entry_price, current_price):
+            logger.info(
+                "Take-profit triggered for %s (entry=%.4f, current=%.4f)",
+                token_id[:12], pos.entry_price, current_price,
+            )
+            tokens_to_close.append((token_id, "take_profit"))
+            continue
+        if cfg.exit_on_edge_flip and pos.strategy == "edge_based":
+            # Re-estimate edge on the live position.  If it's flipped
+            # against us with meaningful magnitude, exit before we hit
+            # stop-loss — limits losses when the original thesis is
+            # invalidated.
+            try:
+                from src.analysis.edge import estimate_edge
+                history = store.get_price_history(token_id, limit=30)
+                if len(history) >= 4:
+                    spread = client.get_spread(token_id) or 0.0
+                    est = estimate_edge(
+                        price=current_price,
+                        price_history=history,
+                        spread=spread,
+                    )
+                    threshold = cfg.exit_edge_flip_threshold
+                    flipped = (
+                        (pos.side == "BUY" and est.edge < -threshold) or
+                        (pos.side == "SELL" and est.edge > threshold)
+                    )
+                    if flipped and est.edge_confidence > 0.3:
+                        logger.info(
+                            "Edge-flip exit for %s (entry=%.4f, current=%.4f, "
+                            "new edge=%+.4f, conf=%.2f)",
+                            token_id[:12], pos.entry_price, current_price,
+                            est.edge, est.edge_confidence,
+                        )
+                        tokens_to_close.append((token_id, "edge_flip"))
+            except Exception:
+                logger.debug(
+                    "Edge-flip check failed for %s", token_id[:12],
+                    exc_info=True,
+                )
+    return tokens_to_close
+
+
+def _persist_tick_stats(
+    store: SQLiteStore,
+    *,
+    timestamp: str,
+    duration_s: float,
+    markets_scanned: int,
+    signals_generated: int,
+    risk_rejections: int,
+    trades_executed: int,
+    summary: dict,
+    daily_pnl: float,
+    skip_warmup: int,
+    skip_no_price: int,
+    skip_hold: int,
+    var_95: float,
+    cvar_95: float,
+    worst_case: float,
+    system_monitor=None,
+) -> None:
+    """Insert one row into ``tick_stats`` with full error routing.
+
+    Surfaces SQLite / OS failures to ``system_monitor.record_db_error``
+    when wired (Mejora 9 + 11).  Other exceptions are intentionally not
+    swallowed — they indicate logic bugs we want to see in tests, not
+    silently lose visibility on.
+    """
+    try:
+        store.insert_tick_stats(
+            timestamp=timestamp,
+            duration_s=duration_s,
+            markets_scanned=markets_scanned,
+            signals_generated=signals_generated,
+            risk_rejections=risk_rejections,
+            trades_executed=trades_executed,
+            open_positions=summary["open_positions"],
+            total_exposure=summary["total_exposure"],
+            realised_pnl=summary["realised_pnl"],
+            unrealised_pnl=summary["unrealised_pnl"],
+            daily_pnl=daily_pnl,
+            skip_warmup=skip_warmup,
+            skip_no_price=skip_no_price,
+            skip_hold=skip_hold,
+            var_95=var_95,
+            cvar_95=cvar_95,
+            worst_case=worst_case,
+            fees_paid=summary.get("fees_paid", 0.0),
+            paper_friction_paid=summary.get("paper_friction_paid", 0.0),
+        )
+    except (sqlite3.Error, OSError) as e:
+        logger.warning("Failed to insert tick stats: %s", e, exc_info=True)
+        if system_monitor is not None:
+            system_monitor.record_db_error("insert_tick_stats", str(e))
+
+
 def _tick(
     market_svc: MarketDataService,
     strategy: BaseStrategy,
@@ -853,49 +1000,12 @@ def _tick_body(
     if tick_id:
         logger.debug("Tick start (tick_id=%s).", tick_id)
 
-    # 1. Check stop-loss / take-profit / edge-flip on existing positions
-    tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
-    for token_id, pos in list(portfolio.positions.items()):
-        current_price = client.get_price(token_id)
-        if current_price is None:
-            logger.debug("No price for position %s — skipping SL/TP check.", token_id[:12])
-            continue
-        if risk_mgr.check_stop_loss(pos.entry_price, current_price):
-            logger.info("Stop-loss triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
-            tokens_to_close.append((token_id, "stop_loss"))
-        elif risk_mgr.check_take_profit(pos.entry_price, current_price):
-            logger.info("Take-profit triggered for %s (entry=%.4f, current=%.4f)", token_id[:12], pos.entry_price, current_price)
-            tokens_to_close.append((token_id, "take_profit"))
-        elif cfg.exit_on_edge_flip and pos.strategy == "edge_based":
-            # Re-estimate edge on the live position.  If it's flipped against
-            # us with meaningful magnitude, exit before we hit stop-loss —
-            # limits losses when the original thesis is invalidated.
-            try:
-                from src.analysis.edge import estimate_edge
-                history = store.get_price_history(token_id, limit=30)
-                if len(history) >= 4:
-                    spread = client.get_spread(token_id) or 0.0
-                    est = estimate_edge(
-                        price=current_price,
-                        price_history=history,
-                        spread=spread,
-                    )
-                    threshold = cfg.exit_edge_flip_threshold
-                    # BUY position + edge now strongly negative → exit
-                    flipped = (
-                        (pos.side == "BUY" and est.edge < -threshold) or
-                        (pos.side == "SELL" and est.edge > threshold)
-                    )
-                    if flipped and est.edge_confidence > 0.3:
-                        logger.info(
-                            "Edge-flip exit for %s (entry=%.4f, current=%.4f, "
-                            "new edge=%+.4f, conf=%.2f)",
-                            token_id[:12], pos.entry_price, current_price,
-                            est.edge, est.edge_confidence,
-                        )
-                        tokens_to_close.append((token_id, "edge_flip"))
-            except Exception:
-                logger.debug("Edge-flip check failed for %s", token_id[:12], exc_info=True)
+    # 1. Check stop-loss / take-profit / edge-flip on existing positions.
+    # Logic factored into ``_collect_exit_candidates`` so this body stays
+    # readable; the helper is unit-tested on its own.
+    tokens_to_close = _collect_exit_candidates(
+        portfolio, risk_mgr, client, store, cfg,
+    )
 
     for token_id, exit_reason in tokens_to_close:
         pos = portfolio.positions.get(token_id)
@@ -1510,37 +1620,25 @@ def _tick_body(
         except Exception:
             logger.debug("Tail-risk computation failed.", exc_info=True)
 
-    # Persist tick stats for dashboard and analysis
-    try:
-        store.insert_tick_stats(
-            timestamp=tick_ts,
-            duration_s=tick_duration,
-            markets_scanned=len(snapshots),
-            signals_generated=signals_generated,
-            risk_rejections=risk_rejections,
-            trades_executed=trades_executed,
-            open_positions=summary["open_positions"],
-            total_exposure=summary["total_exposure"],
-            realised_pnl=summary["realised_pnl"],
-            unrealised_pnl=summary["unrealised_pnl"],
-            daily_pnl=risk_mgr.daily_pnl,
-            skip_warmup=skip_insufficient_history,
-            skip_no_price=skip_no_price,
-            skip_hold=skip_hold,
-            var_95=tail_var,
-            cvar_95=tail_cvar,
-            worst_case=tail_worst,
-            fees_paid=summary.get("fees_paid", 0.0),
-            paper_friction_paid=summary.get("paper_friction_paid", 0.0),
-        )
-    except (sqlite3.Error, OSError) as e:
-        # Distinguish DB integrity / disk failures from arbitrary bugs:
-        # the former is operationally serious (we lose observability)
-        # and gets a WARNING + a critical alert if the monitor is wired.
-        # Anything else still propagates so we don't mask logic errors.
-        logger.warning("Failed to insert tick stats: %s", e, exc_info=True)
-        if system_monitor is not None:
-            system_monitor.record_db_error("insert_tick_stats", str(e))
+    # Persist tick stats for dashboard and analysis (factored out).
+    _persist_tick_stats(
+        store,
+        timestamp=tick_ts,
+        duration_s=tick_duration,
+        markets_scanned=len(snapshots),
+        signals_generated=signals_generated,
+        risk_rejections=risk_rejections,
+        trades_executed=trades_executed,
+        summary=summary,
+        daily_pnl=risk_mgr.daily_pnl,
+        skip_warmup=skip_insufficient_history,
+        skip_no_price=skip_no_price,
+        skip_hold=skip_hold,
+        var_95=tail_var,
+        cvar_95=tail_cvar,
+        worst_case=tail_worst,
+        system_monitor=system_monitor,
+    )
 
     # Mirror tick stats as a JSON line so external pipelines (Loki,
     # Vector, etc.) can consume metrics without reaching into SQLite.

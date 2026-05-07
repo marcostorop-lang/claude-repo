@@ -117,26 +117,51 @@ def run_manifest(manifest_path: str, _unused_cfg: Config, store: SQLiteStore) ->
         os.environ.clear()
         os.environ.update(original_env)
 
+    # Significance vs. coin-flip with Benjamini-Hochberg FDR control.
+    # Each experiment gets a one-sided binomial p-value for
+    # H0: win_rate <= 0.5; we then control the false-discovery rate
+    # at 5% across the whole sweep so that picking "the best" doesn't
+    # cherry-pick lucky variants.
+    from src.analysis.multiple_testing import (
+        benjamini_hochberg,
+        binomial_p_one_sided,
+    )
+    fdr_target = float(manifest.get("fdr", 0.05))
+    pvalues = []
+    for r in results:
+        wins = int(round(r["win_rate"] * r["trades"]))
+        pvalues.append(binomial_p_one_sided(wins=wins, n=r["trades"]))
+    bh = benjamini_hochberg(pvalues, fdr=fdr_target)
+    for r, raw_p, q, rej in zip(results, pvalues, bh["adjusted"], bh["rejected"]):
+        r["p_value"] = round(raw_p, 6)
+        r["q_value"] = round(q, 6)
+        r["significant_fdr"] = bool(rej)
+
     # Persist full results
     out_dir = Path("experiments/results")
     out_dir.mkdir(parents=True, exist_ok=True)
     out_json = out_dir / f"{manifest.get('name', 'run')}.json"
     out_json.write_text(json.dumps(results, indent=2))
 
-    # Build a markdown comparison table
+    # Build a markdown comparison table.  ``sig`` column shows ✓ when the
+    # variant beats the 50/50 null after FDR — operators should prefer
+    # those over the raw "highest win-rate" winner.
     lines = [
         f"# Experiment: {manifest.get('name', 'unnamed')}",
         "",
         f"Tokens replayed: {len(histories)}",
+        f"FDR target: {fdr_target:.2%}",
         "",
-        "| id | strategy | signals | trades | win_rate | avg_ret | total_ret | max_dd | pnl |",
-        "|----|----------|--------:|-------:|---------:|--------:|----------:|-------:|----:|",
+        "| id | strategy | signals | trades | win_rate | avg_ret | total_ret | max_dd | pnl | p | q | sig |",
+        "|----|----------|--------:|-------:|---------:|--------:|----------:|-------:|----:|--:|--:|:---:|",
     ]
     for r in results:
+        sig = "✓" if r["significant_fdr"] else ""
         lines.append(
             f"| {r['id']} | {r['strategy']} | {r['signals']} | {r['trades']} | "
             f"{r['win_rate']:.1%} | {r['avg_return_pct']:+.2%} | {r['total_return_pct']:+.2%} | "
-            f"-{r['max_drawdown_pct']:.2%} | {r['total_pnl']:+.2f} |"
+            f"-{r['max_drawdown_pct']:.2%} | {r['total_pnl']:+.2f} | "
+            f"{r['p_value']:.3f} | {r['q_value']:.3f} | {sig} |"
         )
     lines.append("")
     lines.append(f"Full results: `{out_json}`")

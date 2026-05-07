@@ -246,6 +246,97 @@ def build_clob_shares_fetcher(cfg) -> Optional[Callable[[str], float | None]]:
 # --- Scheduler helper -----------------------------------------------------
 
 
+def reconcile_paper_self(
+    portfolio: PortfolioTracker,
+    store,
+    *,
+    tolerance_shares: float = 1e-6,
+    alerts=None,
+    metrics=None,
+) -> ReconciliationReport:
+    """Compare the live tracker against what the trade log would replay.
+
+    On-chain reconciliation is meaningless in paper mode (no chain), but
+    *internal* drift between the in-memory tracker and the SQLite trade
+    log is still possible — for instance:
+
+    * a position was opened but the matching ``insert_trade`` failed
+      silently (older bare-except),
+    * the trade log was tampered with (pruning, manual edits),
+    * a bug in :meth:`PortfolioTracker.reconstruct_from_trades` that
+      diverges from the live ``open_position``/``close_position`` flow.
+
+    Catching these in paper is cheap insurance — we have the DB right
+    here.  We rebuild a side tracker, compare position-by-position,
+    and report exactly like the on-chain sweep does (same divergence
+    kinds, same alerts) so the dashboard / runbooks don't have to fork.
+
+    Read-only: never mutates ``portfolio`` or ``store``.
+    """
+    if store is None or not hasattr(store, "get_all_trades"):
+        return ReconciliationReport(skipped_no_fetcher=True)
+    try:
+        trades = store.get_all_trades()
+    except Exception:
+        logger.exception("Paper reconcile: failed to read trade history.")
+        return ReconciliationReport(fetch_errors=1)
+
+    # Build a side tracker by replaying.  Doing this every time is cheap
+    # at typical trade volumes (~10k trades / day) and removes the need
+    # to maintain a parallel running shadow.
+    shadow = PortfolioTracker()
+    shadow.reconstruct_from_trades(trades)
+
+    # Compare token-by-token across the union of both tracker keys.
+    tracked_tokens = set(portfolio.positions.keys())
+    shadow_tokens = set(shadow.positions.keys())
+    divergences: list[ReconciliationDivergence] = []
+    for tok in tracked_tokens | shadow_tokens:
+        live = portfolio.positions.get(tok)
+        rep = shadow.positions.get(tok)
+        live_size = live.size if live else 0.0
+        rep_size = rep.size if rep else 0.0
+        kind = _classify(live_size, rep_size, tolerance_shares)
+        if kind is None:
+            continue
+        side = (live or rep).side  # at least one is set
+        cid = (live or rep).condition_id
+        divergences.append(ReconciliationDivergence(
+            token_id=tok, condition_id=cid, side=side,
+            tracked_size=live_size, onchain_size=rep_size,
+            diff=rep_size - live_size, kind=kind,
+        ))
+
+    report = ReconciliationReport(
+        divergences=divergences,
+        positions_checked=len(tracked_tokens | shadow_tokens),
+        fetch_errors=0,
+    )
+    if report.any_divergence:
+        if alerts is not None:
+            alerts.warn(
+                "paper-mode tracker drift",
+                divergences=len(divergences),
+                kinds=sorted({d.kind for d in divergences}),
+            )
+        if metrics is not None and getattr(metrics, "enabled", False):
+            metrics.emit(
+                "paper_reconcile_drift",
+                divergences=len(divergences),
+                positions=len(tracked_tokens | shadow_tokens),
+            )
+        logger.warning(
+            "Paper reconcile: %d divergence(s) across %d positions.",
+            len(divergences), len(tracked_tokens | shadow_tokens),
+        )
+    else:
+        logger.debug(
+            "Paper reconcile: clean (%d positions checked).",
+            len(tracked_tokens | shadow_tokens),
+        )
+    return report
+
+
 def should_run(last_run_epoch: float, interval_minutes: float, now: float) -> bool:
     """Return True when the sweeper is due (or has never run)."""
     if interval_minutes <= 0:

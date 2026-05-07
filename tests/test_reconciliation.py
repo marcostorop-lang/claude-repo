@@ -223,3 +223,78 @@ class TestShouldRun:
         assert should_run(1000.0, 1.0, 1059.9) is False
         assert should_run(1000.0, 1.0, 1060.0) is True
         assert should_run(1000.0, 1.0, 5000.0) is True
+
+
+class TestPaperSelfReconcile:
+    """In-memory tracker vs SQLite trade replay."""
+
+    def _store_with_trades(self, tmp_path, trades):
+        from src.storage.sqlite_store import SQLiteStore
+        path = tmp_path / "rec.db"
+        store = SQLiteStore(str(path))
+        for t in trades:
+            store.insert_trade(
+                order_id=t["order_id"], token_id=t["token_id"],
+                condition_id=t.get("condition_id", "c"), side=t["side"],
+                size=t["size"], price=t["price"], strategy="t",
+                mode="paper", timestamp=t.get("timestamp", "2026-01-01T00:00:00"),
+            )
+        return store
+
+    def test_clean_when_tracker_matches_log(self, tmp_path):
+        from src.portfolio.reconciliation import reconcile_paper_self
+        from src.portfolio.tracker import PortfolioTracker
+        store = self._store_with_trades(tmp_path, [
+            {"order_id": "o1", "token_id": "tA", "side": "BUY",
+             "size": 10, "price": 0.5},
+        ])
+        tracker = PortfolioTracker()
+        tracker.reconstruct_from_trades(store.get_all_trades())
+        rep = reconcile_paper_self(tracker, store)
+        assert not rep.any_divergence
+        assert rep.positions_checked == 1
+        store.close()
+
+    def test_drift_detected_when_tracker_missing_position(self, tmp_path):
+        from src.portfolio.reconciliation import reconcile_paper_self
+        from src.portfolio.tracker import PortfolioTracker
+        store = self._store_with_trades(tmp_path, [
+            {"order_id": "o1", "token_id": "tA", "side": "BUY",
+             "size": 10, "price": 0.5},
+        ])
+        # Tracker forgot the position — DB has it.
+        tracker = PortfolioTracker()
+        rep = reconcile_paper_self(tracker, store)
+        assert rep.any_divergence
+        assert rep.divergences[0].kind == "untracked_onchain"
+        store.close()
+
+    def test_safe_no_store(self):
+        from src.portfolio.reconciliation import reconcile_paper_self
+        from src.portfolio.tracker import PortfolioTracker
+        rep = reconcile_paper_self(PortfolioTracker(), store=None)
+        assert rep.skipped_no_fetcher
+        assert not rep.any_divergence
+
+    def test_alerts_fired_on_drift(self, tmp_path):
+        from src.portfolio.reconciliation import reconcile_paper_self
+        from src.portfolio.tracker import PortfolioTracker
+        from src.utils.alerts import AlertManager, Alert
+
+        class _Sink:
+            def __init__(self):
+                self.alerts: list[Alert] = []
+
+            def emit(self, a):
+                self.alerts.append(a)
+
+        sink = _Sink()
+        mgr = AlertManager(sinks=[sink], dedupe_window_s=0)
+        store = self._store_with_trades(tmp_path, [
+            {"order_id": "o1", "token_id": "tA", "side": "BUY",
+             "size": 10, "price": 0.5},
+        ])
+        rep = reconcile_paper_self(PortfolioTracker(), store, alerts=mgr)
+        assert rep.any_divergence
+        assert any("paper-mode tracker drift" in a.subject for a in sink.alerts)
+        store.close()

@@ -170,3 +170,47 @@ class TestBuildFromStore:
             def get_all_trades(self):
                 return []
         assert build_trade_pnls_from_store(FakeStore()) == []
+
+
+class TestBootstrapCI:
+    def test_sharpe_ci_brackets_point_estimate(self):
+        from src.analysis.performance_metrics import _sharpe_from_daily, sharpe_ci
+        daily = [1.0, -0.5, 0.8, -0.3, 1.2, -0.4, 0.9] * 5
+        point = _sharpe_from_daily(daily)
+        lo, hi = sharpe_ci(daily, n_resamples=500, seed=42)
+        assert lo <= point <= hi
+
+    def test_sharpe_ci_too_few_samples_returns_nan(self):
+        import math
+        from src.analysis.performance_metrics import sharpe_ci
+        lo, hi = sharpe_ci([1.0], n_resamples=100, seed=1)
+        assert math.isnan(lo) and math.isnan(hi)
+
+    def test_win_rate_ci_brackets_truth(self):
+        from src.analysis.performance_metrics import win_rate_ci, _win_rate
+        # 60 wins out of 100 → win rate 0.60
+        pnls = [1.0] * 60 + [-1.0] * 40
+        lo, hi = win_rate_ci(pnls, n_resamples=500, seed=42)
+        assert lo <= _win_rate(pnls) <= hi
+        # CI tightens with N — should not span the whole [0, 1].
+        assert hi - lo < 0.30
+
+    def test_win_rate_ci_seeded_reproducible(self):
+        from src.analysis.performance_metrics import win_rate_ci
+        pnls = [1.0, -1.0] * 30
+        a = win_rate_ci(pnls, n_resamples=200, seed=7)
+        b = win_rate_ci(pnls, n_resamples=200, seed=7)
+        assert a == b
+
+    def test_compute_ci_full_report(self):
+        from src.analysis.performance_metrics import compute_ci
+        trades = [
+            {"pnl": 1.0, "exit_timestamp": "2026-01-01T12:00:00"},
+            {"pnl": -0.5, "exit_timestamp": "2026-01-02T12:00:00"},
+            {"pnl": 0.8, "exit_timestamp": "2026-01-03T12:00:00"},
+        ] * 10
+        ci = compute_ci(trades, n_resamples=200, seed=1)
+        assert ci.n_resamples == 200
+        assert ci.alpha == 0.05
+        assert ci.win_rate_low <= ci.win_rate_high
+        assert ci.sharpe_low <= ci.sharpe_high

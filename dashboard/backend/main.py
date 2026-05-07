@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Database
-from .routes import attribution, config, drift, latency, logs, markets, overview, performance, positions, risk, semantic, slippage, strategies, trades
+from .routes import attribution, config, drift, latency, logs, markets, metrics, overview, performance, positions, risk, semantic, slippage, strategies, trades
 
 _DB_PATH = os.getenv("SQLITE_DB_PATH", "polymarket_bot.db")
 _LOG_FILE = os.getenv("LOG_FILE", "bot.log")
@@ -63,6 +63,8 @@ app.include_router(drift.router, prefix="/api")
 app.include_router(slippage.router, prefix="/api")
 app.include_router(latency.router, prefix="/api")
 app.include_router(attribution.router, prefix="/api")
+# Prometheus exposition under /metrics (unprefixed — convention).
+app.include_router(metrics.router)
 
 
 @app.get("/api/health")
