@@ -132,7 +132,7 @@ def build_clob_balance_fetcher(cfg) -> Optional[Callable[[], float | None]]:
     try:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-    except Exception:
+    except ImportError:
         logger.debug("py-clob-client not importable — no wallet balance fetcher.")
         return None
     if not cfg.private_key:

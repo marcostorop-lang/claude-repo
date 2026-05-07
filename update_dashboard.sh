@@ -1,7 +1,12 @@
 #!/bin/bash
 echo "============================================"
-echo "  PolyBot - Generating Dashboard"
+echo "  PolyBot - Generating Dashboard (DEPRECATED)"
 echo "============================================"
+echo ""
+echo "WARNING: this static generator is deprecated."
+echo "Prefer the FastAPI backend:"
+echo "    cd dashboard/backend && uvicorn main:app --reload"
+echo "    REST  /api/*       Prometheus  /metrics"
 echo ""
 node generate_dashboard.js
 if [ $? -eq 0 ]; then

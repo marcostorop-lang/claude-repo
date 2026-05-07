@@ -1,3 +1,29 @@
+// =====================================================================
+// DEPRECATED — kept for backwards compatibility with legacy automation.
+//
+// This static-HTML generator predates the FastAPI dashboard.  It
+// re-derives PnL from the SQLite ``trades`` table independently of the
+// PortfolioTracker, which is exactly the divergence problem flagged by
+// the audit (dashboard-backend drift, hardcoded balance, hardcoded
+// SL/TP).
+//
+// Use ``dashboard/backend`` (FastAPI) instead:
+//   * REST under /api/* — single source of truth from bot_state.json
+//   * Prometheus metrics under /metrics
+//   * Next.js frontend under dashboard/frontend
+//
+// On invocation this script prints a deprecation banner and continues
+// running so existing cron jobs do not break overnight.  A future
+// release will remove it.
+// =====================================================================
+
+console.warn(
+  "\n[DEPRECATION] generate_dashboard.js is deprecated and will be removed.\n" +
+  "  Replace with the FastAPI backend:\n" +
+  "    cd dashboard/backend && uvicorn main:app --reload\n" +
+  "  REST: http://localhost:8000/api/*    Prometheus: http://localhost:8000/metrics\n"
+);
+
 const path = require("path");
 const fs = require("fs");
 

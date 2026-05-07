@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -235,7 +236,7 @@ def sweep_resolved_positions(
         # resolution_tracker) sees the final payload immediately.
         try:
             store.upsert_market(cid, question, json.dumps(mkt), now)
-        except Exception:
+        except (sqlite3.Error, OSError):
             logger.debug("Sweeper: cache refresh failed for %s", cid[:12], exc_info=True)
 
         for pos in positions:
@@ -286,7 +287,7 @@ def sweep_resolved_positions(
                     exit_reason="market_resolved",
                     spread_at_entry=0.0,
                 )
-            except Exception:
+            except (sqlite3.Error, OSError):
                 logger.exception("Sweeper: failed to persist settlement trade for %s", pos.token_id[:12])
 
             # Decision log for operator visibility in /logs.
@@ -299,7 +300,7 @@ def sweep_resolved_positions(
                     features={"settlement_price": settle, "side": side,
                               "entry_price": entry_price, "size": size},
                 )
-            except Exception:
+            except (sqlite3.Error, OSError):
                 logger.debug("Sweeper: decision_log insert failed", exc_info=True)
 
             # Ground-truth resolution record (the audit table the
@@ -317,7 +318,7 @@ def sweep_resolved_positions(
                     our_exit_price=settle, our_pnl=pnl,
                     prediction_correct=prediction_correct, checked_at=now,
                 )
-            except Exception:
+            except (sqlite3.Error, OSError):
                 # ``market_resolutions`` has no UNIQUE constraint by
                 # design — duplicates are acceptable noise in the audit
                 # log.  Swallow anything else so the sweeper never
@@ -341,7 +342,7 @@ def sweep_resolved_positions(
                     pnl=pnl,
                     return_pct=(settle - entry_price) / entry_price if entry_price > 0 else 0.0,
                 )
-            except Exception:
+            except (sqlite3.Error, OSError):
                 logger.debug("Sweeper: calibration exit update failed", exc_info=True)
 
             resolved = ResolvedPosition(

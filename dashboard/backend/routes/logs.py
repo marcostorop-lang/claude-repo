@@ -32,7 +32,7 @@ def get_logs(
                 entry = _parse_log_line(raw.strip())
                 if entry and (level is None or entry["level"] == level.upper()):
                     lines.append(entry)
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         pass
 
     return {"logs": lines}

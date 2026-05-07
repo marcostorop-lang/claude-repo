@@ -33,6 +33,7 @@ does not panic the bot.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -212,7 +213,7 @@ def build_clob_shares_fetcher(cfg) -> Optional[Callable[[str], float | None]]:
     try:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-    except Exception:
+    except ImportError:
         logger.debug(
             "py-clob-client not importable — no reconciliation fetcher."
         )
@@ -277,7 +278,7 @@ def reconcile_paper_self(
         return ReconciliationReport(skipped_no_fetcher=True)
     try:
         trades = store.get_all_trades()
-    except Exception:
+    except sqlite3.Error:
         logger.exception("Paper reconcile: failed to read trade history.")
         return ReconciliationReport(fetch_errors=1)
 

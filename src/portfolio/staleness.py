@@ -31,6 +31,7 @@ price (or, lacking one, ``alert`` only, never a fabricated close).
 from __future__ import annotations
 
 import logging
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -253,7 +254,7 @@ def _close_stale_position(
                 timestamp=now_iso, exit_reason="staleness_close",
                 spread_at_entry=0.0,
             )
-        except Exception:
+        except (sqlite3.Error, OSError):
             logger.debug("Staleness: trade insert failed (fallback path)", exc_info=True)
         if risk_mgr is not None:
             try:
@@ -272,7 +273,7 @@ def _close_stale_position(
             features={"age_days": report.age_days, "price_range": report.price_range,
                       "samples": report.samples},
         )
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.debug("Staleness: decision_log insert failed", exc_info=True)
 
     if alerts is not None:

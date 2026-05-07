@@ -4,190 +4,230 @@ Bot modular en Python para operar en [Polymarket](https://polymarket.com) con mo
 
 > **AVISO DE RIESGO**: Este software es experimental y con fines educativos. Operar en mercados de predicción conlleva riesgo de pérdida total del capital. Úsalo bajo tu propia responsabilidad.
 
+> **Estado del repo**: este README describe el estado actual (mayo 2026) tras varias rondas de mejora. La rama legacy `bot/` se conserva por sus prototipos con el oráculo Claude pero no es la canónica — todo desarrollo nuevo va en `src/`.
+
 ---
 
 ## Qué hace
 
 - Descarga mercados activos de Polymarket (Gamma API + CLOB API).
-- Filtra mercados por volumen, liquidez y spread.
-- Evalúa dos estrategias: **momentum simple** y **mean reversion**.
-- Aplica un gestor de riesgo (tamaño máximo, exposición total, stop-loss, take-profit).
-- En modo paper: simula órdenes y registra todo en SQLite.
-- En modo live: envía órdenes reales al CLOB de Polymarket (desactivado por defecto).
-- CLI con comandos: `run-bot`, `backfill-markets`, `show-portfolio`, `show-trades`.
+- Filtra por volumen, liquidez, spread, ventana de precio y tiempo a resolución.
+- Evalúa varias estrategias: `simple_momentum`, `mean_reversion`, `edge_based`, `composite`, `semantic_mispricing`.
+- Aplica un risk manager con Kelly opcional (proper o edge-proxy), ajuste por incertidumbre del edge, filtro temporal y de volatilidad, breaker diario y **breaker de drawdown desde peak**.
+- En paper: simula órdenes con slippage por VWAP del libro, partial fills, y fricción de ejecución configurable. Opcionalmente añade latencia y rejection para stress.
+- En live: triple gate (`TRADING_MODE=live` ∧ `ALLOW_LIVE_TRADING=true` ∧ `I_UNDERSTAND_REAL_MONEY="YES_TRADE_REAL_FUNDS"`).
+- Persiste todo en SQLite (trades, decisión, calibración, resoluciones, tick stats, semantic signals).
+- Expone un dashboard FastAPI + Next.js y un endpoint Prometheus `/metrics`.
 
 ---
 
 ## Estructura del proyecto
 
 ```
-src/
-├── main.py                 # Entry point y CLI (Click)
-├── config.py               # Configuración desde variables de entorno
-├── logger.py               # Setup de logging
-├── polymarket/
-│   ├── auth.py             # Creación del cliente CLOB (autenticado o no)
-│   ├── client.py           # Wrapper unificado Gamma + CLOB
-│   ├── market_data.py      # Descarga y filtrado de mercados
-│   └── execution.py        # Capa de ejecución (paper/live)
-├── strategy/
-│   ├── base.py             # Clase abstracta BaseStrategy + Signal
-│   ├── simple_momentum.py  # Estrategia de momentum
-│   └── mean_reversion.py   # Estrategia de reversión a la media
-├── risk/
-│   └── manager.py          # Gestor de riesgo
-├── portfolio/
-│   └── tracker.py          # Seguimiento de posiciones y PnL
-├── storage/
-│   └── sqlite_store.py     # Persistencia en SQLite
-└── utils/
-    ├── time_utils.py
-    └── math_utils.py
-tests/
-├── test_config.py
-├── test_risk_manager.py
-├── test_strategies.py
-└── test_math_utils.py
+src/                          # canónico — todo el desarrollo nuevo va aquí
+├── main.py                   # CLI Click (15 comandos) + run_loop
+├── config.py                 # Config dataclass desde env
+├── logger.py                 # logging con redaction de credenciales y trace IDs
+├── preflight.py              # validaciones previas a arrancar
+├── polymarket/               # auth, cliente unificado, market_data, execution
+├── strategy/                 # base + 5 estrategias
+├── risk/                     # manager (sizing, breakers, filtros)
+├── portfolio/                # tracker FIFO + reconciliación on-chain y paper
+├── storage/                  # SQLite con migraciones
+├── analysis/                 # Brier, Kelly, performance metrics + bootstrap CI,
+│                             # multiple-testing, slippage, fees, calibration,
+│                             # edge, fundamentals, tail-risk, semantic engine, ...
+├── backtest/                 # engine + walk-forward
+├── experiments/              # runner con FDR (Benjamini-Hochberg)
+├── tools/                    # utilidades operativas
+└── utils/                    # alerts, metrics writer, system_monitor, trace, ...
+
+dashboard/                    # canónico
+├── backend/                  # FastAPI (15 routers + /metrics Prometheus)
+└── frontend/                 # Next.js + TypeScript
+
+bot/                          # legacy — ver bot/__init__.py
+tests/                        # 88 archivos, 1097 tests (unit + integración + property)
+docs/                         # runbooks
+experiments/                  # manifiestos JSON + resultados generados
 ```
 
 ---
 
 ## Instalación
 
-### 1. Requisitos previos
+### Requisitos
 
 - Python 3.11 o superior
-- pip
+- `pip`
+- (opcional) Node + `better-sqlite3` solo si quieres el generador estático legacy
 
-### 2. Clonar y preparar entorno
+### Setup
 
 ```bash
 git clone <repo-url>
 cd polymarket-bot
 
-# Crear entorno virtual
 python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-# .venv\Scripts\activate    # Windows
+source .venv/bin/activate    # Linux/macOS
+# .venv\Scripts\activate     # Windows
 
-# Instalar dependencias
 pip install -r requirements.txt
-```
-
-### 3. Configurar variables de entorno
-
-```bash
 cp .env.example .env
-# Editar .env con tus valores
 ```
 
-Las variables principales están documentadas en `.env.example`. Para **paper trading** no necesitas credenciales.
+Para paper trading no necesitas credenciales; los defaults son seguros.
 
 ---
 
 ## Uso
 
-### Ejecutar en modo Paper Trading (por defecto)
+### Ejecutar en paper (default)
 
 ```bash
 python -m src.main run-bot
 ```
 
 El bot:
-1. Descarga mercados activos de Polymarket.
-2. Filtra por volumen, liquidez y spread.
+1. Descarga mercados activos (limitado por `MAX_MARKETS_FETCH`).
+2. Filtra por volumen, liquidez, spread, ventana de precio.
 3. Evalúa la estrategia configurada en cada mercado.
-4. Simula órdenes y las registra en SQLite.
-5. Repite cada `POLL_INTERVAL_SECONDS` (default: 60s).
+4. Verifica salidas (SL/TP/edge-flip) en posiciones abiertas.
+5. Aplica risk checks (sizing, breakers, filtros).
+6. Ejecuta vía paper-engine con slippage y fricción.
+7. Persiste en SQLite y emite eventos a JSONL/alerts/Prometheus.
+8. Repite cada `POLL_INTERVAL_SECONDS` (default 60).
 
-### Otros comandos
+### Otros comandos disponibles
 
 ```bash
-# Descargar y cachear mercados
-python -m src.main backfill-markets
-
-# Ver portafolio (posiciones abiertas)
-python -m src.main show-portfolio
-
-# Ver historial de trades
-python -m src.main show-trades --limit 50
+python -m src.main backfill-markets         # cachea mercados de Gamma
+python -m src.main show-portfolio           # posiciones abiertas
+python -m src.main show-trades --limit 50   # últimos trades
+python -m src.main show-positions           # detalle con P&L marcado a mercado
+python -m src.main backtest <strategy>      # backtest contra price_history
+python -m src.main calibration              # buckets de calibración por confianza
+python -m src.main edge-calibration         # correlación edge → PnL
+python -m src.main check-resolutions        # accuracy histórica vs resolución
+python -m src.main detect-arbs              # observador de arbitraje
+python -m src.main performance-report       # Sharpe / Sortino / DD + CIs
+python -m src.main preflight                # health check de configuración
+python -m src.main test-alerts              # smoke a los webhooks
+python -m src.main daily-summary            # resumen diario por email/webhook
+python -m src.main experiments <manifest>   # sweep con FDR-correction
 ```
 
-### Detener el bot
-
-`Ctrl+C` — el bot terminará el ciclo actual y se detendrá limpiamente.
+`Ctrl+C` o `SIGTERM` → cierre limpio.
 
 ---
 
 ## Activar Live Trading
 
-> **Lee esto con cuidado.** El live trading envía órdenes reales y puedes perder dinero.
+> **Lee esto con cuidado.** Live envía órdenes reales y puedes perder dinero.
 
-### Pasos manuales necesarios
+### Triple gate
 
-1. **Wallet de Polymarket**: Necesitas una wallet de Polygon con fondos (USDC).
-2. **Private key**: Exporta la private key de tu wallet de Polymarket.
-3. **API credentials**: Puedes proporcionarlas directamente o dejar que el SDK las derive desde tu private key (el bot lo intentará automáticamente).
-4. **Configurar `.env`**:
+Las **tres** condiciones deben cumplirse:
 
 ```env
 TRADING_MODE=live
 ALLOW_LIVE_TRADING=true
-PRIVATE_KEY=0xTU_CLAVE_PRIVADA_AQUI
-# Opcionales si tienes API key explícita:
-POLY_API_KEY=...
+I_UNDERSTAND_REAL_MONEY=YES_TRADE_REAL_FUNDS
+```
+
+Falta cualquiera y el bot cae en paper. La frase exacta del tercer gate evita activación accidental por checkbox / typo.
+
+### Credenciales (sólo live)
+
+```env
+PRIVATE_KEY=0xTU_CLAVE
+POLY_API_KEY=...        # opcional — si vacío, el SDK las deriva
 POLY_API_SECRET=...
 POLY_PASSPHRASE=...
 ```
 
-5. **Verificar**: El bot valida la configuración al arrancar y mostrará warnings si faltan credenciales.
+### Pre-live checklist (resumen — completo en `RISK_GUARDRAILS.md`)
 
-### Doble protección
+- ≥ 4 semanas de paper con `PAPER_FRICTION_BPS≥50`
+- `net_pnl_after_costs` positivo y win-rate **significativo después de FDR**
+- Reconciliación paper vs DB sin drift por 7 días
+- Drawdown breaker no tripado en periodo
+- Webhook + Prometheus configurados y testeados con `test-alerts`
 
-Ambas condiciones deben cumplirse para que se envíen órdenes reales:
-- `TRADING_MODE=live`
-- `ALLOW_LIVE_TRADING=true`
+---
 
-Si cualquiera de las dos está desactivada, el bot opera en modo paper.
+## Salvaguardas
+
+| Capa | Mecanismo |
+|---|---|
+| Live gate | Triple `is_live` check en `Config`, `place_order`, `execute` |
+| Daily breaker | `MAX_DAILY_LOSS` — auto-pausa BUYs, persiste reinicio |
+| Drawdown breaker | `MAX_DRAWDOWN_PCT` desde peak equity, auto-reset en peak nuevo |
+| Spread | `MAX_SPREAD` enforced en `risk/manager` y `market_data` |
+| Stale data | `STALE_PRICE_SECONDS` rechaza precios viejos |
+| First-N live autopause | `LIVE_TRADE_MAX_FIRST_N` requiere ack tras los primeros fills |
+| Kill switch | `touch KILL_SWITCH` → cierre inmediato |
+| Heartbeat | `SystemMonitor` alerta si un tick tarda > `5×poll_interval` |
+| Reconciliación | On-chain (live) y paper-self (interna) con alertas en drift |
+| Logger redactor | Enmascara `private_key`, `api_secret`, `passphrase` y hex 0x… |
+
+---
+
+## Observabilidad
+
+- **Logs**: stdout + `bot.log` rotativo (10 MB × 5). Credenciales redactadas.
+- **Trace IDs**: cada tick y cada orden recibe ID propagado por `contextvars`.
+- **Métricas JSONL**: `METRICS_FILE` → consumible por Loki/Vector.
+- **Prometheus**: `GET /metrics` en el dashboard backend (11 series clave).
+- **SQLite**: `tick_stats`, `decision_log`, `calibration`, `market_resolutions`, `slippage_records`.
+- **Alertas**: webhook Slack/Discord + JSONL local. Severidades `info|warning|critical`.
+- **Dashboard**: `dashboard/backend` (FastAPI) consumido por `dashboard/frontend` (Next.js).
+
+---
+
+## Estadística
+
+- Sizing Kelly exacto (`SIZING_KELLY_PROPER=true`) con ajuste opcional por σ del edge (`SIZING_KELLY_UNCERTAINTY=true`): `m = max(0, 1 - cv²)`.
+- Brier score temporal (7d vs histórico) con bootstrap CI 95% y flag de drift.
+- Bootstrap CI para Sharpe y win-rate en `performance-report`.
+- Calibración por buckets de confianza y por buckets de edge.
+- Bayesian posterior tracker de win-rate por estrategia.
+- Walk-forward backtest con detector de overfitting.
+- FDR (Benjamini-Hochberg) en sweeps de experimentos.
+- Cancelaciones de mercados excluidas del denominador de accuracy (anti-supervivencia).
 
 ---
 
 ## Tests
 
 ```bash
-pytest tests/ -v
+pytest tests/ -v                    # 1097 tests, ~25 s
+pytest tests/test_polymarket_contracts.py -v
+pytest tests/test_brier.py -v
 ```
 
----
-
-## Limitaciones actuales
-
-- **Sin websockets**: El bot usa polling HTTP. Para baja latencia se necesitaría una conexión WebSocket al CLOB.
-- **Sin backtesting**: No hay un motor de backtesting integrado; solo paper trading en tiempo real.
-- **Historial de precios limitado**: Solo se almacenan los precios que el bot observa en cada tick. No se descargan datos históricos.
-- **Estrategias básicas**: Las dos estrategias incluidas son ilustrativas. En producción necesitarías señales más sofisticadas.
-- **Sin rebalanceo automático**: El portfolio tracker es in-memory y se reconstruye desde trades al usar los comandos CLI.
-- **Sin soporte multi-cuenta**: Una sola wallet/cuenta por instancia.
+Cobertura por módulos críticos (auth, market_data, client, risk, portfolio, storage, execution, accounting, calibration). Property-based testing con Hypothesis en `test_portfolio_properties.py`.
 
 ---
 
-## Mejoras sugeridas
+## Limitaciones conocidas
 
-- [ ] WebSocket para streaming de precios en tiempo real.
-- [ ] Motor de backtesting con datos históricos.
-- [ ] Dashboard web (Streamlit/Dash) para monitoreo.
-- [ ] Notificaciones (Telegram, Discord, email).
-- [ ] Más estrategias: market making, event-driven, sentiment analysis.
-- [ ] Persistencia del portfolio tracker (actualmente in-memory).
-- [ ] Rate limiter explícito para respetar los límites de la API.
-- [ ] Docker Compose para despliegue fácil.
-- [ ] CI/CD con GitHub Actions.
+- HTTP polling, no WebSocket (latencia de descubrimiento ≥ `POLL_INTERVAL_SECONDS`).
+- Una sola wallet por instancia.
+- Backtest replaya price_history que el propio bot grabó: no hay download masivo de histórico.
+- Estrategias semánticas requieren `ANTHROPIC_API_KEY` y costean.
+- `bot/` (legacy) tiene una implementación alternativa async; no se sincroniza con `src/`.
+- `generate_dashboard.js` queda como deprecated; preferir `dashboard/backend` + `/metrics`.
 
 ---
 
-## Nota sobre el SDK
+## Documentación adicional
 
-El SDK oficial de Polymarket (`py-clob-client`) es el recomendado para interactuar con la CLOB API. Aunque el ecosistema de Polymarket tiene herramientas más maduras en TypeScript, `py-clob-client` cubre las operaciones esenciales (order book, midpoint, spread, colocación de órdenes). Si en el futuro necesitas funcionalidades que solo estén disponibles en el SDK de TypeScript, podrías usar un microservicio Node.js como puente.
+- `CLAUDE.md` — convenciones para asistentes IA y layout del repo.
+- `AUDIT_CURRENT_SYSTEM.md` — estado conocido.
+- `RISK_GUARDRAILS.md` — checklist y reglas de risk.
+- `LEARNING_PHASE_PLAN.md`, `EXPERIMENT_FRAMEWORK.md`, `DASHBOARD_IMPROVEMENT_PLAN.md`.
+- `CHANGELOG_AI.md` — historial de cambios automatizados.
 
 ---
 

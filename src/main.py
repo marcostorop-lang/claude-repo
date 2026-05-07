@@ -231,7 +231,7 @@ def run_loop(cfg: Config) -> None:
                 )
                 row = cur.fetchone()
                 initial_count = int(row[0]) if row is not None else 0
-            except Exception:
+            except (sqlite3.Error, ValueError, TypeError):
                 logger.debug("autopause: seed from DB failed", exc_info=True)
             risk_mgr.live_autopause_gate = LiveTradeAutopauseGate(
                 threshold=cfg.live_trade_autopause_threshold,

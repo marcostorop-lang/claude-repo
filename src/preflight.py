@@ -334,7 +334,7 @@ def _try_fetch_usdc_balance(cfg: Config) -> float | None:
     try:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-    except Exception:
+    except ImportError:
         return None
     try:
         client = ClobClient(
@@ -347,7 +347,9 @@ def _try_fetch_usdc_balance(cfg: Config) -> float | None:
         if raw is None:
             return None
         return float(raw) / 1_000_000.0
-    except Exception:
+    except (AttributeError, TypeError, ValueError, OSError):
+        # SDK call surface mismatch / network issue / unparseable balance.
+        # Caller treats None as "skip the wallet check, WARN not FAIL."
         return None
 
 

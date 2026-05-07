@@ -1,7 +1,12 @@
 @echo off
 echo ============================================
-echo   PolyBot - Generando Dashboard
+echo   PolyBot - Generando Dashboard (DEPRECATED)
 echo ============================================
+echo.
+echo AVISO: este generador estatico esta deprecado.
+echo Preferir el backend FastAPI:
+echo     cd dashboard\backend ^&^& uvicorn main:app --reload
+echo     REST  /api/*       Prometheus  /metrics
 echo.
 node generate_dashboard.js
 if %errorlevel% equ 0 (

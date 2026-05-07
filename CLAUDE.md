@@ -9,6 +9,21 @@ This repository contains:
   Both are already functioning.
   This is not a greenfield project.
 
+## Codebase layout
+
+* `src/` is the **canonical** trading bot.  All production guards
+  (paper/live triple gate, daily + drawdown circuit breakers, paper-
+  trade friction, reconciliation, alerting, Prometheus metrics) live
+  here.  The `Dockerfile` and `run_bot.sh` target `python -m src.main`.
+* `bot/` is **legacy / experimental** — kept for the Claude-oracle
+  research strategies and the async data feeds; do **not** extend it.
+  See `bot/__init__.py` for the deprecation note.  Fixes to risk,
+  accounting, or execution must land in `src/`, not here.
+* `dashboard/backend/` (FastAPI) + `dashboard/frontend/` (Next.js) is
+  the **canonical** dashboard.  `generate_dashboard.js` is a deprecated
+  static generator; the FastAPI `/api/*` and `/metrics` endpoints are
+  the source of truth for any new visualisation.
+
 ## Permanent rules
 
 * Never rebuild from scratch unless explicitly asked.

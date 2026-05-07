@@ -69,13 +69,13 @@ class MarketDataService:
                 import json
                 try:
                     outcomes = json.loads(outcomes)
-                except Exception:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     outcomes = []
             if isinstance(tokens, str):
                 import json
                 try:
                     tokens = json.loads(tokens)
-                except Exception:
+                except (json.JSONDecodeError, TypeError, ValueError):
                     tokens = []
 
             volume = _safe_float(mkt.get("volume") or mkt.get("volumeNum"))

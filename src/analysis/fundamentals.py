@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import sqlite3
 from dataclasses import dataclass, field
 
 from src.storage.sqlite_store import SQLiteStore
@@ -76,7 +77,7 @@ def compute_fundamentals(
                 (token_id,),
             )
         rows = cur.fetchall()
-    except Exception:
+    except sqlite3.Error:
         logger.debug("Failed to load price history for fundamentals", exc_info=True)
         return f
 
@@ -131,7 +132,7 @@ def compute_fundamentals(
         if older_count > 0:
             vol_change = (recent_count - older_count / 23.0) / max(older_count / 23.0, 1)
             f.volume_trend = max(-1.0, min(1.0, vol_change))
-    except Exception:
+    except (sqlite3.Error, ValueError, TypeError, ZeroDivisionError):
         pass
 
     # --- Price-volume agreement ---
