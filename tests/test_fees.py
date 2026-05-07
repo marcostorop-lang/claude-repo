@@ -132,3 +132,57 @@ class TestMainLoopAccrual:
         _accrue_fill_fee(cfg, pt, filled_size=0, fill_price=0.50)
         _accrue_fill_fee(cfg, pt, filled_size=100, fill_price=0)
         assert pt.fees_paid == 0.0
+
+
+class TestPaperFriction:
+    """PAPER_FRICTION_BPS — paper-only execution-cost stress (default 50 bps)."""
+
+    def test_default_paper_friction_is_active(self):
+        cfg = _cfg(PAPER_FRICTION_BPS="50")  # default-equivalent
+        assert cfg.paper_friction_bps == pytest.approx(50.0)
+
+    def test_friction_accrues_in_paper_mode(self):
+        from src.main import _accrue_fill_fee
+        cfg = _cfg(PAPER_FRICTION_BPS="50", TAKER_FEE_BPS="0")
+        pt = PortfolioTracker()
+        # notional = 100 * 0.50 = $50; friction = 50bps * $50 = $0.25
+        _accrue_fill_fee(cfg, pt, filled_size=100, fill_price=0.50)
+        assert pt.paper_friction_paid == pytest.approx(0.25)
+        assert pt.fees_paid == 0.0  # real fees still zero
+
+    def test_friction_disabled_when_zero(self):
+        from src.main import _accrue_fill_fee
+        cfg = _cfg(PAPER_FRICTION_BPS="0")
+        pt = PortfolioTracker()
+        _accrue_fill_fee(cfg, pt, filled_size=100, fill_price=0.50)
+        assert pt.paper_friction_paid == 0.0
+
+    def test_friction_does_not_apply_in_live_mode(self):
+        """Paper friction must never burden live PnL."""
+        from src.main import _accrue_fill_fee
+        cfg = _cfg(
+            TRADING_MODE="live",
+            ALLOW_LIVE_TRADING="true",
+            I_UNDERSTAND_REAL_MONEY="YES_TRADE_REAL_FUNDS",
+            PRIVATE_KEY="0x" + "a" * 64,
+            POLY_API_KEY="x", POLY_API_SECRET="y", POLY_PASSPHRASE="z",
+            PAPER_FRICTION_BPS="50",
+        )
+        # Sanity: this config is actually live.
+        assert cfg.is_live, "test setup error: cfg should be live"
+        pt = PortfolioTracker()
+        _accrue_fill_fee(cfg, pt, filled_size=100, fill_price=0.50)
+        assert pt.paper_friction_paid == 0.0
+
+    def test_summary_exposes_net_after_costs(self):
+        pt = PortfolioTracker()
+        pt.open_position(Position("t1", "c1", "BUY", 10, 0.50, "s", "o1"))
+        pt.close_position("t1", 0.60)  # realises 1.0
+        pt.record_fee(0.20)
+        pt.record_paper_friction(0.05)
+        summary = pt.summary()
+        assert summary["realised_pnl"] == pytest.approx(1.0)
+        assert summary["fees_paid"] == pytest.approx(0.20)
+        assert summary["paper_friction_paid"] == pytest.approx(0.05)
+        assert summary["net_pnl_after_fees"] == pytest.approx(0.80)
+        assert summary["net_pnl_after_costs"] == pytest.approx(0.75)

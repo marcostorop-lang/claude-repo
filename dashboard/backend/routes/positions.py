@@ -39,9 +39,13 @@ def get_positions():
                 (b["condition_id"],),
             )
 
-            # Compute SL/TP distances (using config defaults)
-            sl_pct = 0.10
-            tp_pct = 0.20
+            # SL/TP percentages come from the live bot config snapshot so
+            # the dashboard can never lie about thresholds when the
+            # operator has tuned them.  Defaults preserved for cold-start
+            # (before the first tick has written ``bot_state.json``).
+            from ..bot_state import get_config
+            sl_pct = float(get_config("stop_loss_pct", 0.10))
+            tp_pct = float(get_config("take_profit_pct", 0.20))
             sl_price = b["price"] * (1 - sl_pct)
             tp_price = b["price"] * (1 + tp_pct)
             dist_to_sl = ((current_price - sl_price) / (b["price"] - sl_price) * 100) if b["price"] != sl_price else 100

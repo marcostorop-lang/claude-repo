@@ -36,6 +36,14 @@ class RiskManager:
         self._daily_realized_pnl: float = 0.0
         self._current_date: date = date.today()
         self._circuit_breaker_tripped: bool = False
+        # Drawdown-from-peak circuit breaker.  Distinct from the daily
+        # breaker: this one looks at net equity (realised + unrealised)
+        # vs. its all-time peak, so a slow bleed across many days still
+        # trips it even if no single day breaches max_daily_loss.  Auto-
+        # resets on a new equity peak (full recovery).
+        self._peak_equity: float = 0.0
+        self._last_equity: float = 0.0
+        self._drawdown_breaker_tripped: bool = False
         # Optional temporal-edge filter (see ``src/analysis/temporal_edge.py``).
         # Left ``None`` by default; the main loop constructs one and attaches
         # it when ``TEMPORAL_FILTER_ENABLED=true``.  Risk checks treat
@@ -138,6 +146,65 @@ class RiskManager:
         return self._daily_realized_pnl
 
     # ------------------------------------------------------------------
+    # Drawdown-from-peak tracking
+    # ------------------------------------------------------------------
+
+    def update_equity(self, equity_usd: float) -> None:
+        """Track the running peak equity and trip the drawdown breaker.
+
+        Called once per tick from the main loop with the current
+        ``realised + unrealised`` PnL (or any monotone equity proxy).
+        Trip semantics:
+
+        * New peak (``equity > _peak_equity``) → updates peak and *clears*
+          the breaker (full-recovery release).
+        * Otherwise, if ``(_peak_equity - equity) / _peak_equity >=
+          max_drawdown_pct`` and ``_peak_equity > 0``, the breaker trips.
+        * If ``max_drawdown_pct`` is 0 or > 1 the feature is off.
+
+        Persistence: the breaker is *not* persisted across restarts on
+        purpose.  Peak equity is reseeded from rebuilt portfolio state
+        when ``run_loop`` calls this with the post-reconstruct equity.
+        """
+        limit = float(getattr(self.cfg, "max_drawdown_pct", 0.0) or 0.0)
+        self._last_equity = float(equity_usd)
+        if limit <= 0 or limit > 1:
+            return  # feature off
+        if equity_usd > self._peak_equity:
+            was_tripped = self._drawdown_breaker_tripped
+            self._peak_equity = float(equity_usd)
+            self._drawdown_breaker_tripped = False
+            if was_tripped:
+                logger.info(
+                    "Drawdown breaker reset on new equity peak: $%.2f", equity_usd,
+                )
+            return
+        if self._peak_equity <= 0:
+            return  # cold start; meaningless until we've banked positive equity
+        drawdown = (self._peak_equity - equity_usd) / self._peak_equity
+        if drawdown >= limit and not self._drawdown_breaker_tripped:
+            self._drawdown_breaker_tripped = True
+            logger.warning(
+                "DRAWDOWN BREAKER TRIPPED: equity $%.2f is %.1f%% below peak "
+                "$%.2f (limit %.1f%%)",
+                equity_usd, drawdown * 100, self._peak_equity, limit * 100,
+            )
+
+    @property
+    def is_drawdown_breaker_active(self) -> bool:
+        return self._drawdown_breaker_tripped
+
+    @property
+    def current_drawdown_pct(self) -> float:
+        if self._peak_equity <= 0:
+            return 0.0
+        return max(0.0, (self._peak_equity - self._last_equity) / self._peak_equity)
+
+    @property
+    def peak_equity(self) -> float:
+        return self._peak_equity
+
+    # ------------------------------------------------------------------
     # ------------------------------------------------------------------
     # Dynamic position sizing
     # ------------------------------------------------------------------
@@ -151,6 +218,7 @@ class RiskManager:
         book_depth_usd: float = 0.0,
         strategy: str = "",
         end_date: str = "",
+        edge_stddev: float | None = None,
     ) -> float:
         """Compute the proposed position size in shares.
 
@@ -177,18 +245,29 @@ class RiskManager:
         # confidence (for model-uncertainty discounting).  A negative
         # or zero edge collapses to size 0 — we simply won't trade.
         if getattr(self.cfg, "sizing_kelly_proper", False) and edge is not None:
-            from src.analysis.kelly import kelly_fraction as _kelly
+            from src.analysis.kelly import (
+                edge_uncertainty_multiplier as _edge_unc,
+                kelly_fraction as _kelly,
+            )
             f_star = _kelly(price=price, edge=edge)
+            uncertainty_mult = 1.0
+            if getattr(self.cfg, "sizing_kelly_uncertainty", False):
+                uncertainty_mult = _edge_unc(edge, edge_stddev)
             kelly_mult = (
-                f_star * max(confidence, 0.0) * self.cfg.kelly_fraction
+                f_star
+                * max(confidence, 0.0)
+                * self.cfg.kelly_fraction
+                * uncertainty_mult
             )
             kelly_mult = min(max(kelly_mult, 0.0), 1.0)
             base_usd *= kelly_mult
             logger.debug(
                 "Proper-Kelly sizing: price=%.4f edge=%+.4f f*=%.4f "
-                "conf=%.3f frac=%.2f → mult=%.4f (base=$%.2f)",
+                "conf=%.3f frac=%.2f σ_edge=%s unc_mult=%.4f → mult=%.4f (base=$%.2f)",
                 price, edge, f_star, confidence,
-                self.cfg.kelly_fraction, kelly_mult, base_usd,
+                self.cfg.kelly_fraction,
+                "n/a" if edge_stddev is None else f"{edge_stddev:.4f}",
+                uncertainty_mult, kelly_mult, base_usd,
             )
         # Edge-aware Kelly sizing takes precedence when enabled and edge is known.
         # For prediction markets, edge ≈ P_estimated - P_market.  The Kelly
@@ -316,6 +395,16 @@ class RiskManager:
         # --- Circuit breaker ---
         if self.is_circuit_breaker_active and signal.action == Action.BUY:
             return RiskVerdict(False, 0.0, f"Circuit breaker: daily loss ${abs(self._daily_realized_pnl):.2f} exceeds limit.")
+
+        # --- Drawdown breaker ---
+        # Block new BUYs only — never strand SELL exits.
+        if self.is_drawdown_breaker_active and signal.action == Action.BUY:
+            return RiskVerdict(
+                False, 0.0,
+                f"Drawdown breaker: equity {self.current_drawdown_pct * 100:.1f}% "
+                f"below peak ${self._peak_equity:.2f} (limit "
+                f"{self.cfg.max_drawdown_pct * 100:.1f}%).",
+            )
 
         # --- Temporal edge filter ---
         # Only gates new BUYs — SELL exits always fire (don't strand

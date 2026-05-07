@@ -61,3 +61,39 @@ class TestResolutionStorage:
         assert stats["total_resolved"] == 0
         assert stats["accuracy"] == 0.0
         store.close()
+
+    def test_cancellation_excluded_from_accuracy(self):
+        """Cancelled markets must NOT pollute the accuracy denominator.
+
+        Survivorship-bias guard: a strategy holding a position in a market
+        that gets voided/withdrawn shouldn't be charged a "loss" — the
+        capital comes back, and the prediction is undefined.
+        """
+        store = SQLiteStore(":memory:")
+        now = iso_now()
+        store.insert_resolution("c1", "t1", "Q1", "YES", 1.0, now,
+                                "BUY", 0.55, 0.70, 1.50, True, now,
+                                is_cancelled=False)
+        store.insert_resolution("c2", "t2", "Q2", "NO", 0.0, now,
+                                "BUY", 0.55, 0.30, -2.50, False, now,
+                                is_cancelled=False)
+        # Cancellation: pnl=0, prediction_correct flag is meaningless.
+        store.insert_resolution("c3", "t3", "Q3", "CANCELLED", 0.0, now,
+                                "BUY", 0.55, 0.55, 0.0, False, now,
+                                is_cancelled=True)
+        stats = store.get_resolution_stats()
+        assert stats["total_resolved"] == 3
+        assert stats["decided"] == 2
+        assert stats["cancelled"] == 1
+        assert stats["correct_predictions"] == 1
+        assert stats["accuracy"] == 0.5  # 1/2, not 1/3
+        store.close()
+
+    def test_cancellation_default_is_false(self):
+        """Backwards compat: existing call sites omit is_cancelled."""
+        store = SQLiteStore(":memory:")
+        store.insert_resolution("c1", "t1", "Q1", "YES", 1.0, iso_now(),
+                                "BUY", 0.55, 0.70, 1.50, True, iso_now())
+        rows = store.get_resolutions()
+        assert rows[0]["is_cancelled"] == 0
+        store.close()

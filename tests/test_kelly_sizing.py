@@ -123,3 +123,85 @@ class TestComputePositionSizeKellyProper:
             price=0.5, confidence=1.0, edge=0.10, liquidity=1000.0,
         )
         assert size == pytest.approx(20.0)
+
+
+# -- Edge-uncertainty multiplier --------------------------------------------
+
+class TestEdgeUncertaintyMultiplier:
+    def test_zero_sigma_returns_one(self):
+        from src.analysis.kelly import edge_uncertainty_multiplier
+        assert edge_uncertainty_multiplier(0.05, 0.0) == 1.0
+
+    def test_none_sigma_returns_one(self):
+        from src.analysis.kelly import edge_uncertainty_multiplier
+        assert edge_uncertainty_multiplier(0.05, None) == 1.0
+
+    def test_signal_equals_noise_zero(self):
+        from src.analysis.kelly import edge_uncertainty_multiplier
+        # σ == |edge| → cv=1 → 1 - 1 = 0
+        assert edge_uncertainty_multiplier(0.05, 0.05) == 0.0
+
+    def test_pure_noise_clamped_zero(self):
+        from src.analysis.kelly import edge_uncertainty_multiplier
+        # σ > |edge| → cv > 1 → mult would go negative → clamp 0
+        assert edge_uncertainty_multiplier(0.02, 0.10) == 0.0
+
+    def test_quadratic_shrinkage(self):
+        from src.analysis.kelly import edge_uncertainty_multiplier
+        # σ = |edge|/2 → cv = 0.5 → mult = 1 - 0.25 = 0.75
+        assert edge_uncertainty_multiplier(0.10, 0.05) == pytest.approx(0.75)
+
+
+class TestRiskManagerWithUncertainty:
+    def test_uncertainty_off_by_default(self):
+        cfg = _cfg(
+            max_position_size=100.0,
+            kelly_fraction=1.0,
+            sizing_kelly_proper=True,
+            sizing_kelly_uncertainty=False,
+            sizing_edge_kelly=False,
+            sizing_confidence_scale=False,
+        )
+        rm = RiskManager(cfg, PortfolioTracker())
+        # With sigma_edge supplied but feature off → identical sizing.
+        size_no_unc = rm.compute_position_size(
+            price=0.5, confidence=1.0, edge=0.10, edge_stddev=0.05,
+        )
+        size_no_arg = rm.compute_position_size(
+            price=0.5, confidence=1.0, edge=0.10,
+        )
+        assert size_no_unc == pytest.approx(size_no_arg)
+
+    def test_uncertainty_shrinks_size_when_on(self):
+        cfg = _cfg(
+            max_position_size=100.0,
+            kelly_fraction=1.0,
+            sizing_kelly_proper=True,
+            sizing_kelly_uncertainty=True,
+            sizing_edge_kelly=False,
+            sizing_confidence_scale=False,
+        )
+        rm = RiskManager(cfg, PortfolioTracker())
+        # |edge|=0.10, σ=0.05 → cv=0.5 → mult=0.75
+        size_unc = rm.compute_position_size(
+            price=0.5, confidence=1.0, edge=0.10, edge_stddev=0.05,
+        )
+        size_clean = rm.compute_position_size(
+            price=0.5, confidence=1.0, edge=0.10, edge_stddev=0.0,
+        )
+        assert size_unc == pytest.approx(0.75 * size_clean, rel=1e-3)
+
+    def test_pure_noise_zeroes_size(self):
+        cfg = _cfg(
+            max_position_size=100.0,
+            kelly_fraction=1.0,
+            sizing_kelly_proper=True,
+            sizing_kelly_uncertainty=True,
+            sizing_edge_kelly=False,
+            sizing_confidence_scale=False,
+        )
+        rm = RiskManager(cfg, PortfolioTracker())
+        size = rm.compute_position_size(
+            price=0.5, confidence=1.0, edge=0.05, edge_stddev=0.10,
+        )
+        assert size == 0.0

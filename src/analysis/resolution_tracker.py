@@ -74,36 +74,50 @@ def check_resolutions(
         ).fetchone()
 
         question = ""
-        is_resolved = False
-        resolved_outcome = ""
+        is_terminal = False  # market done trading (resolved OR cancelled)
+        is_resolved = False  # has a ground-truth outcome
+        mkt_data: dict = {}
+
+        def _classify(d: dict) -> tuple[bool, bool]:
+            """Return (is_terminal, is_resolved).
+
+            * resolved → has a verifiable outcome (UMA settled, resolutionPrice
+              set, ``resolved=True``).  Goes into accuracy stats.
+            * terminal-but-not-resolved → trading stopped without a verifiable
+              outcome (cancelled, withdrawn, dispute).  Logged as
+              ``is_cancelled=1`` and excluded from accuracy.
+            """
+            res = bool(
+                d.get("resolved", False)
+                or d.get("umaResolutionStatus", "").lower() == "resolved"
+                or d.get("resolutionTimestamp")
+                or d.get("resolutionPrice") is not None
+            )
+            term = bool(
+                res
+                or d.get("closed", False)
+                or d.get("archived", False)
+                or not d.get("active", True)
+            )
+            return term, res
 
         if cached and cached["data"]:
             try:
                 mkt_data = json.loads(cached["data"])
                 question = cached["question"] or mkt_data.get("question", "")
-                # Check if market is resolved
-                is_resolved = (
-                    mkt_data.get("closed", False)
-                    or mkt_data.get("resolved", False)
-                    or not mkt_data.get("active", True)
-                )
-                resolved_outcome = mkt_data.get("resolutionSource", "") or ""
+                is_terminal, is_resolved = _classify(mkt_data)
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # Also try fetching fresh data from Gamma API
-        if not is_resolved:
+        # Always re-fetch when cache says non-terminal (cheap freshness
+        # check) to avoid stale-cache misses on recently resolved markets.
+        if not is_terminal:
             try:
                 fresh = client._gamma_get(f"/markets/{cid}")
                 if fresh:
-                    is_resolved = (
-                        fresh.get("closed", False)
-                        or fresh.get("resolved", False)
-                        or not fresh.get("active", True)
-                    )
+                    mkt_data = fresh
+                    is_terminal, is_resolved = _classify(fresh)
                     question = fresh.get("question", question)
-
-                    # Update cache with fresh data
                     store.upsert_market(
                         cid, question, json.dumps(fresh), now,
                     )
@@ -113,8 +127,13 @@ def check_resolutions(
 
         checked += 1
 
-        if not is_resolved:
+        if not is_terminal:
             continue
+        # We treat cancellations symmetrically: book an entry with
+        # is_cancelled=1, pnl=0 (capital returned), and continue to the
+        # next market.  Accuracy denominator excludes these (see
+        # ``get_resolution_stats``).
+        is_cancelled = is_terminal and not is_resolved
 
         # Market resolved — record each of our trades' outcomes
         trades = trades_by_cid.get(cid, [])
@@ -125,6 +144,40 @@ def check_resolutions(
             token_id = bt["token_id"]
             entry_price = bt["price"]
 
+            matching_sell = next(
+                (s for s in sell_trades if s["token_id"] == token_id),
+                None,
+            )
+
+            if is_cancelled:
+                # No ground truth — record symmetric cancellation entry.
+                # PnL: if we already exited via a SELL, lock in that PnL;
+                # otherwise treat capital as returned (0 PnL).  Never
+                # punish the strategy for events outside its control.
+                exit_price = matching_sell["price"] if matching_sell else entry_price
+                pnl = (
+                    (exit_price - entry_price) * bt["size"]
+                    if matching_sell
+                    else 0.0
+                )
+                store.insert_resolution(
+                    condition_id=cid,
+                    token_id=token_id,
+                    question=question,
+                    outcome="CANCELLED",
+                    resolved_price=0.0,
+                    resolution_ts=now,
+                    our_side="BUY",
+                    our_entry_price=entry_price,
+                    our_exit_price=exit_price,
+                    our_pnl=pnl,
+                    prediction_correct=False,  # n/a; flagged via is_cancelled
+                    checked_at=now,
+                    is_cancelled=True,
+                )
+                new_resolutions += 1
+                continue
+
             # Try to get the current/final price for this token
             final_price = None
             try:
@@ -132,20 +185,48 @@ def check_resolutions(
             except Exception:
                 pass
 
+            # Prefer the structured resolution price when the API exposes
+            # it — that's the ground truth, not the last-traded price.
             if final_price is None:
-                # Assume resolved to 0 or 1 based on whether it's near those
-                final_price = 0.0  # conservative: assume loss
+                rp = mkt_data.get("resolutionPrice")
+                if rp is not None:
+                    try:
+                        final_price = float(rp)
+                    except (TypeError, ValueError):
+                        final_price = None
+
+            if final_price is None:
+                # Resolved but no recoverable price → demote to cancelled
+                # rather than silently assume 0 (which would invent a loss).
+                exit_price = matching_sell["price"] if matching_sell else entry_price
+                pnl = (
+                    (exit_price - entry_price) * bt["size"]
+                    if matching_sell
+                    else 0.0
+                )
+                store.insert_resolution(
+                    condition_id=cid,
+                    token_id=token_id,
+                    question=question,
+                    outcome="CANCELLED",
+                    resolved_price=0.0,
+                    resolution_ts=now,
+                    our_side="BUY",
+                    our_entry_price=entry_price,
+                    our_exit_price=exit_price,
+                    our_pnl=pnl,
+                    prediction_correct=False,
+                    checked_at=now,
+                    is_cancelled=True,
+                )
+                new_resolutions += 1
+                continue
 
             # For a BUY on a YES token:
             # resolved_price near 1.0 → prediction correct
             # resolved_price near 0.0 → prediction wrong
             prediction_correct = final_price > 0.5
 
-            # Find matching sell (if any) for PnL
-            matching_sell = next(
-                (s for s in sell_trades if s["token_id"] == token_id),
-                None,
-            )
             exit_price = matching_sell["price"] if matching_sell else final_price
             pnl = (exit_price - entry_price) * bt["size"]
 
@@ -162,6 +243,7 @@ def check_resolutions(
                 our_pnl=pnl,
                 prediction_correct=prediction_correct,
                 checked_at=now,
+                is_cancelled=False,
             )
             new_resolutions += 1
 
@@ -175,9 +257,10 @@ def check_resolutions(
         f"API errors: {errors}",
         "",
         "## Cumulative Resolution Stats",
-        f"- Total resolved: {stats['total_resolved']}",
+        f"- Total terminal: {stats['total_resolved']} "
+        f"(decided: {stats.get('decided', 0)}, cancelled: {stats.get('cancelled', 0)})",
         f"- Correct predictions: {stats['correct_predictions']}",
-        f"- Accuracy: {stats['accuracy']:.1%}",
+        f"- Accuracy (decided only): {stats['accuracy']:.1%}",
         f"- Total PnL from resolutions: ${stats['total_pnl']:+.2f}",
     ]
     return "\n".join(lines)

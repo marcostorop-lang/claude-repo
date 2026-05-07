@@ -46,6 +46,10 @@ class PortfolioTracker:
     # from realised_pnl so the gross trading signal stays uncontaminated —
     # the dashboard computes net = realised_pnl - fees_paid explicitly.
     fees_paid: float = 0.0
+    # Cumulative *simulated* paper-trade execution friction (PAPER_FRICTION_BPS).
+    # Paper-only — never accrued in live mode — and kept in a separate
+    # counter from ``fees_paid`` so the dashboard can show both honestly.
+    paper_friction_paid: float = 0.0
 
     def open_position(self, pos: Position) -> None:
         """Open a new position or add to an existing one.
@@ -377,6 +381,16 @@ class PortfolioTracker:
         if fee_usd and fee_usd > 0:
             self.fees_paid += fee_usd
 
+    def record_paper_friction(self, friction_usd: float) -> None:
+        """Add to the cumulative *simulated* paper-trade friction counter.
+
+        Separate from :meth:`record_fee` so live and paper costs never
+        commingle: the dashboard surfaces both, but live PnL is never
+        burdened with a synthetic deduction.
+        """
+        if friction_usd and friction_usd > 0:
+            self.paper_friction_paid += friction_usd
+
     def summary(self, price_fn=None) -> dict:
         unrealised = self.total_unrealised_pnl(price_fn) if price_fn else 0.0
         gross_net = self.realised_pnl + unrealised
@@ -393,4 +407,12 @@ class PortfolioTracker:
             "net_pnl": gross_net,
             "fees_paid": self.fees_paid,
             "net_pnl_after_fees": gross_net - self.fees_paid,
+            "paper_friction_paid": self.paper_friction_paid,
+            # Total cost-adjusted PnL: deducts both real fees (live or paper-
+            # configured) and the conservative paper-friction stress.  This
+            # is the number to use for "would the strategy survive realistic
+            # execution?" gating.
+            "net_pnl_after_costs": (
+                gross_net - self.fees_paid - self.paper_friction_paid
+            ),
         }

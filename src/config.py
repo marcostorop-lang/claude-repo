@@ -100,6 +100,14 @@ class Config:
     take_profit_pct: float = field(default_factory=lambda: _env_float("TAKE_PROFIT_PCT", 0.20))
     max_open_positions: int = field(default_factory=lambda: _env_int("MAX_OPEN_POSITIONS", 5))
     max_daily_loss: float = field(default_factory=lambda: _env_float("MAX_DAILY_LOSS", 50.0))
+    # Drawdown-from-peak circuit breaker.  When net equity (realised +
+    # unrealised PnL) falls more than this fraction below its all-time
+    # peak, new BUYs are blocked until equity recovers to a new peak.
+    # SELL exits are NEVER blocked — we don't want stranded positions
+    # while the breaker is active.  Set to 0 or a value > 1 to disable.
+    # Default 0.20 (20%): a cushion that lets normal volatility breathe
+    # but trips on a sustained losing streak.
+    max_drawdown_pct: float = field(default_factory=lambda: _env_float("MAX_DRAWDOWN_PCT", 0.20))
     max_exposure_per_event: float = field(default_factory=lambda: _env_float("MAX_EXPOSURE_PER_EVENT", 100.0))
     # When True, positions that are opposing sides of the same binary event
     # (BUY Yes + BUY No on the same condition_id, or symmetric shorts) are
@@ -165,6 +173,16 @@ class Config:
     sizing_kelly_proper: bool = field(
         default_factory=lambda: _env_bool("SIZING_KELLY_PROPER", False)
     )
+    # Down-weight Kelly sizing by the coefficient of variation of the
+    # edge estimator (σ/|edge|).  Multiplier ``max(0, 1 - cv²)`` shrinks
+    # full Kelly when the edge is known imprecisely — a textbook result
+    # for log-growth maximisation under parameter uncertainty.  Opt in
+    # only after the strategy reports a meaningful ``edge_stddev`` per
+    # signal (see ``Signal.edge_stddev`` in ``src/strategy/base.py``);
+    # otherwise the multiplier is 1.0 and behaviour is unchanged.
+    sizing_kelly_uncertainty: bool = field(
+        default_factory=lambda: _env_bool("SIZING_KELLY_UNCERTAINTY", False)
+    )
     # Minimum edge magnitude to trade (below this → HOLD regardless of confidence)
     min_edge_for_trade: float = field(default_factory=lambda: _env_float("MIN_EDGE_FOR_TRADE", 0.0))
     # Optional per-category overrides for MIN_EDGE_FOR_TRADE.  Expected as
@@ -208,6 +226,20 @@ class Config:
     taker_fee_bps: float = field(default_factory=lambda: _env_float("TAKER_FEE_BPS", 0.0))
     maker_fee_bps: float = field(default_factory=lambda: _env_float("MAKER_FEE_BPS", 0.0))
 
+    # -- Paper-trade execution friction (default ON) --------------------------
+    # Conservative deduction representing the gap between paper-perfect fills
+    # and live execution: residual slippage beyond the modelled half-spread,
+    # gas at settlement, latency-induced re-pricing, and partial-rejection
+    # tail.  Polymarket's protocol fee is 0 today (taker_fee_bps above);
+    # this knob is *paper-only* — never applied to live trades — and
+    # records to a separate ``paper_friction_paid`` counter so it cannot
+    # contaminate live accounting if a misconfigured operator flips
+    # ALLOW_LIVE_TRADING.  Set ``PAPER_FRICTION_BPS=0`` to disable for
+    # apples-to-apples backtest comparisons.
+    paper_friction_bps: float = field(
+        default_factory=lambda: _env_float("PAPER_FRICTION_BPS", 50.0)
+    )
+
     # -- Order posting mode (paper-only experiment) ---------------------------
     # ``taker``           — cross the spread; fill is immediate at VWAP/ask
     #                       (current behaviour, default).
@@ -219,6 +251,31 @@ class Config:
     # Strictly opt-in — default preserves paper PnL exactly.
     order_mode: str = field(default_factory=lambda: _env("ORDER_MODE", "taker"))
     maker_fill_prob: float = field(default_factory=lambda: _env_float("MAKER_FILL_PROB", 0.7))
+
+    # -- Paper-trade latency / rejection model (opt-in) -----------------------
+    # Off by default (0 means feature disabled) so existing PnL replays stay
+    # bit-for-bit reproducible.  When enabled, ``_paper_execute`` will:
+    #   * Sample a latency in ms ~ |Normal(mean, std)| and adversely drift
+    #     the fill price by ``paper_adverse_drift_bps_per_100ms`` for that
+    #     duration (BUY pays more, SELL receives less) — models the fact
+    #     that someone else may have moved the book between decision and
+    #     execution.  Adverse-selection by construction.
+    #   * Reject the order with probability ``paper_rejection_prob``,
+    #     simulating self-trade prevention, post-only conflicts, or
+    #     transient API failures.  Useful for stress-testing strategy
+    #     robustness to incomplete fill streams.
+    paper_latency_ms_mean: float = field(
+        default_factory=lambda: _env_float("PAPER_LATENCY_MS_MEAN", 0.0)
+    )
+    paper_latency_ms_stddev: float = field(
+        default_factory=lambda: _env_float("PAPER_LATENCY_MS_STDDEV", 100.0)
+    )
+    paper_rejection_prob: float = field(
+        default_factory=lambda: _env_float("PAPER_REJECTION_PROB", 0.0)
+    )
+    paper_adverse_drift_bps_per_100ms: float = field(
+        default_factory=lambda: _env_float("PAPER_ADVERSE_DRIFT_BPS_PER_100MS", 0.0)
+    )
 
     # -- Semantic Mispricing Engine (opt-in, default off) ---------------------
     # A read-only observer that detects mispricings between a target market

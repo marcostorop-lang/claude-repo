@@ -96,3 +96,65 @@ class TestRiskManager:
         rm = RiskManager(cfg, PortfolioTracker())
         assert rm.check_take_profit(1.0, 1.21) is True
         assert rm.check_take_profit(1.0, 1.10) is False
+
+
+class TestDrawdownBreaker:
+    """MAX_DRAWDOWN_PCT — block new BUYs when equity falls past peak limit."""
+
+    def test_cold_start_no_breaker(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0.20")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(0.0)
+        assert not rm.is_drawdown_breaker_active
+        rm.update_equity(-5.0)  # negative cold-start: still no breaker
+        assert not rm.is_drawdown_breaker_active
+
+    def test_new_peak_updates_state(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0.20")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(100.0)
+        assert rm.peak_equity == 100.0
+        rm.update_equity(120.0)
+        assert rm.peak_equity == 120.0
+        assert rm.current_drawdown_pct == 0.0
+
+    def test_breaker_trips_below_threshold(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0.20")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(100.0)
+        rm.update_equity(85.0)  # 15% dd
+        assert not rm.is_drawdown_breaker_active
+        rm.update_equity(79.99)  # 20.01% dd
+        assert rm.is_drawdown_breaker_active
+        assert rm.current_drawdown_pct == pytest.approx(0.2001, rel=1e-3)
+
+    def test_breaker_blocks_new_buys_only(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0.20")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(100.0)
+        rm.update_equity(70.0)  # 30% dd → tripped
+        assert rm.is_drawdown_breaker_active
+        # BUY rejected
+        v_buy = rm.check("tok", Signal(Action.BUY, 0.8), 10, 0.5)
+        assert not v_buy.allowed
+        assert "Drawdown breaker" in v_buy.reason
+        # SELL exits still allowed (can't strand positions)
+        v_sell = rm.check("tok", Signal(Action.SELL, 0.8), 10, 0.5)
+        assert v_sell.allowed or "Drawdown" not in v_sell.reason
+
+    def test_breaker_resets_on_new_peak(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0.20")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(100.0)
+        rm.update_equity(70.0)
+        assert rm.is_drawdown_breaker_active
+        rm.update_equity(105.0)  # full recovery + new peak
+        assert not rm.is_drawdown_breaker_active
+        assert rm.peak_equity == 105.0
+
+    def test_disabled_when_pct_zero(self):
+        cfg = _cfg(MAX_DRAWDOWN_PCT="0")
+        rm = RiskManager(cfg, PortfolioTracker())
+        rm.update_equity(100.0)
+        rm.update_equity(50.0)  # 50% dd, but feature off
+        assert not rm.is_drawdown_breaker_active

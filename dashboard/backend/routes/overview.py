@@ -63,6 +63,16 @@ def get_overview():
     last_trade = db.query_one("SELECT timestamp FROM trades ORDER BY id DESC LIMIT 1")
     markets_count = db.query_one("SELECT COUNT(DISTINCT condition_id) as cnt FROM markets_cache") or {"cnt": 0}
 
+    # Paper "balance" is a synthetic figure for paper mode only.  We
+    # derive both the starting balance and the realised+fees breakdown
+    # from the bot's live state snapshot rather than hardcoding $1000.
+    from ..bot_state import get_paper_starting_balance, get_state
+    state = get_state()
+    starting_balance = get_paper_starting_balance()
+    portfolio_state = state.get("portfolio", {})
+    fees_paid = float(portfolio_state.get("fees_paid", 0.0))
+    paper_friction_paid = float(portfolio_state.get("paper_friction_paid", 0.0))
+
     return {
         "bot_active": True,
         "last_update": last_trade["timestamp"] if last_trade else None,
@@ -72,7 +82,11 @@ def get_overview():
         "total_pnl": round(total_pnl, 4),
         "daily_pnl": round(daily["pnl"], 4),
         "current_exposure": round(exposure_row["exp"], 4) if exposure_row else 0,
-        "simulated_balance": round(1000 + total_pnl, 4),
+        "simulated_balance": round(starting_balance + total_pnl - fees_paid - paper_friction_paid, 4),
+        "starting_balance": round(starting_balance, 2),
+        "fees_paid": round(fees_paid, 4),
+        "paper_friction_paid": round(paper_friction_paid, 4),
+        "net_pnl_after_costs": round(total_pnl - fees_paid - paper_friction_paid, 4),
         "markets_monitored": markets_count["cnt"],
         "open_positions": len(open_positions),
     }

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import time
 
@@ -69,16 +70,24 @@ def _accrue_fill_fee(
 ) -> None:
     """Record the execution fee for a fill, if the fee model is enabled.
 
-    No-op when ``taker_fee_bps == 0`` (default).  Keeping the call site-
-    unconditional keeps the trading flow identical whether fees are on or
-    off — only the fee counter changes.
+    Two costs accrue here, kept in separate counters:
+      * Real protocol fee: ``TAKER_FEE_BPS`` (0 by default — Polymarket's
+        actual schedule).  Applies in *both* live and paper.
+      * Paper-only friction: ``PAPER_FRICTION_BPS`` (50 by default) — a
+        conservative deduction representing the gap between paper-perfect
+        fills and live execution (latency, residual slippage, settlement
+        gas, partial-rejection tail).  Never accrued in live mode so live
+        PnL is never burdened with a synthetic deduction.
     """
     if filled_size <= 0 or fill_price <= 0:
         return
-    # Always compute; helper returns 0 when bps==0.
     from src.analysis.fees import compute_fee_usd
     notional = filled_size * fill_price
     portfolio.record_fee(compute_fee_usd(cfg, notional, is_maker=False))
+    if not cfg.is_live:
+        friction_bps = float(getattr(cfg, "paper_friction_bps", 0.0) or 0.0)
+        if friction_bps > 0:
+            portfolio.record_paper_friction(notional * friction_bps / 10000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -753,11 +762,16 @@ def _export_bot_state(
             "mode": "paper" if cfg.is_paper else "live",
             "strategy": strategy.name,
             "circuit_breaker_active": risk_mgr.is_circuit_breaker_active,
+            "drawdown_breaker_active": risk_mgr.is_drawdown_breaker_active,
             "daily_pnl": round(risk_mgr.daily_pnl, 4),
+            "drawdown_pct": round(risk_mgr.current_drawdown_pct, 4),
+            "peak_equity": round(risk_mgr.peak_equity, 4),
             "portfolio": {
                 "open_positions": portfolio.open_position_count(),
                 "total_exposure": round(portfolio.total_exposure(), 2),
                 "realised_pnl": round(portfolio.realised_pnl, 4),
+                "fees_paid": round(portfolio.fees_paid, 4),
+                "paper_friction_paid": round(portfolio.paper_friction_paid, 4),
             },
             "config": {
                 "max_position_size": cfg.max_position_size,
@@ -767,16 +781,23 @@ def _export_bot_state(
                 "take_profit_pct": cfg.take_profit_pct,
                 "max_spread": cfg.max_spread,
                 "max_daily_loss": cfg.max_daily_loss,
+                "max_drawdown_pct": cfg.max_drawdown_pct,
                 "min_price": cfg.min_price,
                 "max_price": cfg.max_price,
                 "poll_interval": cfg.poll_interval,
+                "taker_fee_bps": cfg.taker_fee_bps,
+                "paper_friction_bps": cfg.paper_friction_bps,
             },
             "positions": positions_data,
         }
         with open("bot_state.json", "w") as f:
             json.dump(state, f, indent=2)
-    except Exception:
-        logger.debug("Failed to export bot state JSON.", exc_info=True)
+    except (OSError, TypeError, ValueError) as e:
+        # OSError = disk full / read-only fs; TypeError/ValueError = bad
+        # JSON serialisation (a non-serialisable field slipped in).
+        # Both are operationally meaningful — promote to WARNING so the
+        # dashboard staleness has a visible cause in the log.
+        logger.warning("Failed to export bot state JSON: %s", e, exc_info=True)
 
 
 def _tick(
@@ -792,11 +813,45 @@ def _tick(
     semantic_smoother=None,
     metrics=None,
     latency_tracker=None,
+    system_monitor=None,
 ) -> None:
     """One iteration of the bot loop."""
+    from src.utils.trace import tick_scope, current_tick_id
+
+    # Generate a tick ID and bind it to contextvars for the entire body
+    # of _tick.  Any logger.* call (including from libs) will see it via
+    # the TraceContextFilter installed in src.logger.setup_logging.
+    with tick_scope() as tick_id:
+        return _tick_body(
+            market_svc, strategy, risk_mgr, executor, portfolio, store,
+            client, cfg, tick_id=tick_id, semantic_smoother=semantic_smoother,
+            metrics=metrics, latency_tracker=latency_tracker,
+            system_monitor=system_monitor,
+        )
+
+
+def _tick_body(
+    market_svc: MarketDataService,
+    strategy: BaseStrategy,
+    risk_mgr: RiskManager,
+    executor: ExecutionEngine,
+    portfolio: PortfolioTracker,
+    store: SQLiteStore,
+    client: PolymarketClient,
+    cfg: Config,
+    *,
+    tick_id: str = "",
+    semantic_smoother=None,
+    metrics=None,
+    latency_tracker=None,
+    system_monitor=None,
+) -> None:
+    """Implementation of one tick — wrapped by ``_tick`` for trace-ID setup."""
 
     tick_start = utc_timestamp()
     tick_ts = iso_now()
+    if tick_id:
+        logger.debug("Tick start (tick_id=%s).", tick_id)
 
     # 1. Check stop-loss / take-profit / edge-flip on existing positions
     tokens_to_close: list[tuple[str, str]] = []  # (token_id, exit_reason)
@@ -1406,6 +1461,11 @@ def _tick(
     # Log tick summary with timing and per-reason counters
     tick_duration = utc_timestamp() - tick_start
     summary = portfolio.summary(price_fn=client.get_price)
+    # Feed equity to the drawdown-from-peak breaker before logging so a
+    # newly-tripped breaker shows up in the same tick line.  Equity =
+    # net PnL (realised + unrealised) — a monotone proxy that doesn't
+    # depend on a phantom starting balance.
+    risk_mgr.update_equity(summary.get("net_pnl", 0.0))
     logger.info(
         "Tick complete (%.1fs): markets=%d, signals=%d, risk_rejected=%d, trades=%d | "
         "skip: warmup=%d, already_open=%d, no_price=%d, hold=%d | daily_pnl=$%.2f | Portfolio: %s",
@@ -1470,9 +1530,17 @@ def _tick(
             var_95=tail_var,
             cvar_95=tail_cvar,
             worst_case=tail_worst,
+            fees_paid=summary.get("fees_paid", 0.0),
+            paper_friction_paid=summary.get("paper_friction_paid", 0.0),
         )
-    except Exception:
-        logger.debug("Failed to insert tick stats.", exc_info=True)
+    except (sqlite3.Error, OSError) as e:
+        # Distinguish DB integrity / disk failures from arbitrary bugs:
+        # the former is operationally serious (we lose observability)
+        # and gets a WARNING + a critical alert if the monitor is wired.
+        # Anything else still propagates so we don't mask logic errors.
+        logger.warning("Failed to insert tick stats: %s", e, exc_info=True)
+        if system_monitor is not None:
+            system_monitor.record_db_error("insert_tick_stats", str(e))
 
     # Mirror tick stats as a JSON line so external pipelines (Loki,
     # Vector, etc.) can consume metrics without reaching into SQLite.

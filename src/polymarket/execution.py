@@ -63,9 +63,15 @@ class ExecutionEngine:
 
     def execute(self, order: OrderRequest) -> OrderResult:
         """Execute an order request."""
-        if self.cfg.is_paper or not self.cfg.is_live:
-            return self._paper_execute(order)
-        return self._live_execute(order)
+        from src.utils.trace import order_scope
+        # Bind a per-order ID for the duration of this call so any
+        # log line emitted inside the paper or live executor — and
+        # the SDK calls they make — can be correlated with the trade
+        # row that lands in SQLite.
+        with order_scope():
+            if self.cfg.is_paper or not self.cfg.is_live:
+                return self._paper_execute(order)
+            return self._live_execute(order)
 
     # ------------------------------------------------------------------
     # Paper execution
@@ -74,6 +80,40 @@ class ExecutionEngine:
     def _paper_execute(self, order: OrderRequest) -> OrderResult:
         import random
         import uuid
+
+        # ------------------------------------------------------------------
+        # Latency / rejection stress model (opt-in via PAPER_LATENCY_*).
+        # Both knobs default to 0 so the deterministic taker path below is
+        # bit-for-bit unchanged unless the operator enables them.  Maker
+        # path is left untouched because its fill model already encodes
+        # stochasticity via ``maker_fill_prob``.
+        # ------------------------------------------------------------------
+        rejection_prob = max(0.0, min(1.0, float(
+            getattr(self.cfg, "paper_rejection_prob", 0.0) or 0.0
+        )))
+        if rejection_prob > 0 and random.random() < rejection_prob:
+            logger.info(
+                "[PAPER-REJECT] %s %.4f of %s rejected (p=%.3f, simulating "
+                "self-trade / post-only / transient API failure).",
+                order.side, order.size, order.token_id[:12], rejection_prob,
+            )
+            return OrderResult(
+                success=False, order_id="", mode="paper",
+                message=f"Simulated rejection (p={rejection_prob:.3f}).",
+                filled_size=0.0, fill_price=0.0,
+            )
+
+        latency_mean = max(0.0, float(
+            getattr(self.cfg, "paper_latency_ms_mean", 0.0) or 0.0
+        ))
+        latency_ms = 0.0
+        if latency_mean > 0:
+            stddev = max(0.0, float(
+                getattr(self.cfg, "paper_latency_ms_stddev", 0.0) or 0.0
+            ))
+            # Half-normal-ish: |N(mean, stddev)|, clamped to [1, mean*5].
+            latency_ms = abs(random.gauss(latency_mean, stddev))
+            latency_ms = max(1.0, min(latency_ms, latency_mean * 5.0))
 
         # ------------------------------------------------------------------
         # Maker path (paper-only).  The caller has already set ``price`` to
@@ -144,6 +184,24 @@ class ExecutionEngine:
                 fill_price = order.price + half_spread
             else:
                 fill_price = max(order.price - half_spread, 0.0001)
+
+        # Latency-induced adverse drift: if PAPER_ADVERSE_DRIFT_BPS_PER_100MS
+        # > 0 and we sampled a non-zero latency, the book moves *against* us
+        # during the wait by drift_bps * (latency_ms / 100) basis points of
+        # midpoint.  BUY pays more, SELL receives less.  Bounded by the
+        # current price so we never go negative or above 1.
+        drift_rate = max(0.0, float(
+            getattr(self.cfg, "paper_adverse_drift_bps_per_100ms", 0.0) or 0.0
+        ))
+        if latency_ms > 0 and drift_rate > 0:
+            drift_bps = drift_rate * (latency_ms / 100.0)
+            drift_frac = drift_bps / 10000.0
+            mid = order.price if order.price > 0 else fill_price
+            adverse = mid * drift_frac
+            if order.side == "BUY":
+                fill_price = min(fill_price + adverse, 0.9999)
+            else:
+                fill_price = max(fill_price - adverse, 0.0001)
 
         # Partial fill handling: if the caller computed a max_fillable_size
         # from book depth and it's below the requested size, fill only what's

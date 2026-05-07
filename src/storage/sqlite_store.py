@@ -100,7 +100,11 @@ class SQLiteStore:
                 our_exit_price  REAL,
                 our_pnl         REAL,
                 prediction_correct INTEGER,
-                checked_at      TEXT NOT NULL
+                checked_at      TEXT NOT NULL,
+                -- 1 = market closed without a verifiable resolution
+                -- (cancellation, dispute, withdrawn).  Excluded from
+                -- accuracy denominator to avoid survivorship bias.
+                is_cancelled    INTEGER NOT NULL DEFAULT 0
             )
         """)
         cur.execute("""
@@ -174,7 +178,9 @@ class SQLiteStore:
                 skip_hold       INTEGER NOT NULL DEFAULT 0,
                 var_95          REAL NOT NULL DEFAULT 0.0,
                 cvar_95         REAL NOT NULL DEFAULT 0.0,
-                worst_case      REAL NOT NULL DEFAULT 0.0
+                worst_case      REAL NOT NULL DEFAULT 0.0,
+                fees_paid       REAL NOT NULL DEFAULT 0.0,
+                paper_friction_paid REAL NOT NULL DEFAULT 0.0
             )
         """)
         self._conn.commit()
@@ -209,10 +215,15 @@ class SQLiteStore:
                 if col not in existing_ts:
                     cur.execute(f"ALTER TABLE tick_stats ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
                     logger.info("Migrated tick_stats: added column '%s'", col)
-            for col in ("var_95", "cvar_95", "worst_case"):
+            for col in ("var_95", "cvar_95", "worst_case", "fees_paid", "paper_friction_paid"):
                 if col not in existing_ts:
                     cur.execute(f"ALTER TABLE tick_stats ADD COLUMN {col} REAL NOT NULL DEFAULT 0.0")
                     logger.info("Migrated tick_stats: added column '%s'", col)
+        # market_resolutions: add is_cancelled column for older DBs.
+        existing_mr = {row[1] for row in cur.execute("PRAGMA table_info(market_resolutions)").fetchall()}
+        if existing_mr and "is_cancelled" not in existing_mr:
+            cur.execute("ALTER TABLE market_resolutions ADD COLUMN is_cancelled INTEGER NOT NULL DEFAULT 0")
+            logger.info("Migrated market_resolutions: added column 'is_cancelled'")
         self._conn.commit()
 
     # -- Trades ----------------------------------------------------------------
@@ -473,12 +484,14 @@ class SQLiteStore:
         var_95: float = 0.0,
         cvar_95: float = 0.0,
         worst_case: float = 0.0,
+        fees_paid: float = 0.0,
+        paper_friction_paid: float = 0.0,
     ) -> None:
         """Record per-tick aggregate statistics for observability."""
         self._conn.execute(
-            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case),
+            "INSERT INTO tick_stats (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case, fees_paid, paper_friction_paid) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (timestamp, duration_s, markets_scanned, signals_generated, risk_rejections, trades_executed, open_positions, total_exposure, realised_pnl, unrealised_pnl, daily_pnl, skip_warmup, skip_no_price, skip_hold, var_95, cvar_95, worst_case, fees_paid, paper_friction_paid),
         )
         self._conn.commit()
 
@@ -545,14 +558,16 @@ class SQLiteStore:
         our_pnl: float,
         prediction_correct: bool,
         checked_at: str,
+        is_cancelled: bool = False,
     ) -> None:
         self._conn.execute(
             "INSERT INTO market_resolutions "
             "(condition_id, token_id, question, outcome, resolved_price, resolution_ts, "
-            "our_side, our_entry_price, our_exit_price, our_pnl, prediction_correct, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "our_side, our_entry_price, our_exit_price, our_pnl, prediction_correct, checked_at, is_cancelled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (condition_id, token_id, question, outcome, resolved_price, resolution_ts,
-             our_side, our_entry_price, our_exit_price, our_pnl, int(prediction_correct), checked_at),
+             our_side, our_entry_price, our_exit_price, our_pnl, int(prediction_correct), checked_at,
+             int(bool(is_cancelled))),
         )
         self._conn.commit()
 
@@ -563,21 +578,33 @@ class SQLiteStore:
         return [dict(row) for row in cur.fetchall()]
 
     def get_resolution_stats(self) -> dict:
-        """Return aggregate resolution statistics."""
+        """Return aggregate resolution statistics.
+
+        Cancellations (``is_cancelled=1``) are counted separately and
+        excluded from the accuracy denominator — including them would
+        introduce a bias because we have no ground truth for cancelled
+        markets, only that we held a position when they voided.
+        """
         cur = self._conn.execute(
             "SELECT COUNT(*) as total, "
-            "SUM(prediction_correct) as correct, "
+            "SUM(CASE WHEN is_cancelled=0 THEN 1 ELSE 0 END) as decided, "
+            "SUM(CASE WHEN is_cancelled=0 THEN prediction_correct ELSE 0 END) as correct, "
+            "SUM(CASE WHEN is_cancelled=1 THEN 1 ELSE 0 END) as cancelled, "
             "SUM(our_pnl) as total_pnl "
             "FROM market_resolutions"
         )
         row = cur.fetchone()
         total = row["total"] or 0
+        decided = row["decided"] or 0
         correct = row["correct"] or 0
+        cancelled = row["cancelled"] or 0
         total_pnl = row["total_pnl"] or 0.0
         return {
             "total_resolved": total,
+            "decided": decided,
+            "cancelled": cancelled,
             "correct_predictions": correct,
-            "accuracy": correct / total if total > 0 else 0.0,
+            "accuracy": correct / decided if decided > 0 else 0.0,
             "total_pnl": total_pnl,
         }
 

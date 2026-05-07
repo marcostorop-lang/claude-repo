@@ -62,3 +62,40 @@ def kelly_fraction(price: float, edge: float) -> float:
     if f_star <= 0.0:
         return 0.0
     return min(f_star, 1.0)
+
+
+def edge_uncertainty_multiplier(edge: float, edge_stddev: float) -> float:
+    """Down-weight Kelly sizing by the coefficient of variation of the edge.
+
+    Closed-form Kelly assumes a *known* edge.  In reality our edge is an
+    estimate with a standard error.  When the standard error is large
+    relative to the edge, full Kelly oversizes — a textbook result is
+    that the optimal fraction shrinks roughly linearly in the *signal-
+    to-noise* ratio.  We use the conservative multiplier::
+
+        m = max(0, 1 - (σ/|edge|)²)
+
+    derived from the second-order Taylor approximation to expected log
+    growth under uncertain p.  Properties:
+
+    * σ = 0 (perfectly known edge) → m = 1 (full Kelly).
+    * σ = |edge| (signal == noise) → m = 0 (don't size on this edge).
+    * σ > |edge| → m clipped to 0 (pure noise).
+    * σ < |edge| → m ∈ (0, 1), shrinks quadratically.
+
+    Returns ``1.0`` when ``edge_stddev`` is ``None`` or ``<= 0`` so call
+    sites that don't track an estimator variance see no behaviour
+    change.  Likewise when ``|edge|`` is zero (bet wouldn't be taken
+    anyway).
+    """
+    if edge is None or edge_stddev is None:
+        return 1.0
+    abs_edge = abs(float(edge))
+    sigma = float(edge_stddev)
+    if abs_edge <= 0.0 or sigma <= 0.0:
+        return 1.0
+    cv = sigma / abs_edge
+    mult = 1.0 - cv * cv
+    if mult <= 0.0:
+        return 0.0
+    return mult
